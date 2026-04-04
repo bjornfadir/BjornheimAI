@@ -680,6 +680,12 @@ async def _process_github_event_for_user(
     settings = await sessions.resolve_github_settings(chat_id, config)
     target_chat_id = settings["notify_chat_id"]
 
+    # Resolve per-user os_user for subprocess isolation.
+    # Falls back to the global claude_user when the user has no os_user
+    # or no UserConfig at all (legacy mode).
+    user_config = config.get_user_config(chat_id)
+    claude_user = user_config.os_user if user_config and user_config.os_user else config.claude_user
+
     # ── PR review routing ────────────────────────────────────────
     # When PR review is enabled for this user, reviewable PR events
     # (opened, reopened, synchronize) are routed to the review pipeline
@@ -721,7 +727,7 @@ async def _process_github_event_for_user(
                     payload,
                     webhook_port=request.app["webhook_port"],
                     webhook_secret=request.app["webhook_secret"],
-                    claude_user=request.app.get("claude_user"),
+                    claude_user=claude_user,
                     local_repo_path=local_repo_path,
                     spec_dir=request.app.get("spec_dir", "specs"),
                     notify_chat_id=target_chat_id,
@@ -767,7 +773,7 @@ async def _process_github_event_for_user(
                     payload,
                     webhook_port=request.app["webhook_port"],
                     webhook_secret=request.app["webhook_secret"],
-                    claude_user=request.app.get("claude_user"),
+                    claude_user=claude_user,
                     notify_chat_id=target_chat_id,
                 )
             )

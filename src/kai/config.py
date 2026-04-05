@@ -1161,6 +1161,32 @@ def load_config() -> Config:
                     guidance,
                 )
 
+        # Warn when GitHub agent features are enabled but no users have
+        # github_repos configured. Events will never reach the agents
+        # because _get_subscribed_users() returns empty for every
+        # incoming webhook. The fallback path in _process_github_event()
+        # delivers basic notifications but does not guarantee the agents
+        # fire.
+        no_repos = not any(uc.github_repos for uc in user_configs.values())
+        if no_repos:
+            review_on = pr_review_enabled or any(uc.pr_review is True for uc in user_configs.values())
+            triage_on = issue_triage_enabled or any(uc.issue_triage is True for uc in user_configs.values())
+            if review_on or triage_on:
+                features = []
+                if review_on:
+                    features.append("PR review")
+                if triage_on:
+                    features.append("issue triage")
+                log.warning(
+                    "GitHub features enabled (%s) but no users have "
+                    "github_repos configured. GitHub webhook events will "
+                    "not be delivered to these features. Add 'github_repos' "
+                    "to users.yaml entries. See: https://github.com/"
+                    "dcellison/kai/wiki/Multi-User-Setup"
+                    "#what-you-must-set-manually",
+                    ", ".join(features),
+                )
+
     # Validate CLAUDE_MODEL against the same VALID_MODELS set used
     # for workspace config. Catches typos at startup instead of
     # letting them propagate to a confusing runtime failure.

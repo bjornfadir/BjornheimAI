@@ -417,10 +417,20 @@ async def call_service(
                 json=body if body is not None else None,
                 timeout=timeout,
             ) as resp:
-                # Read with a size cap to prevent OOM from oversized
-                # responses. Read one extra byte to detect truncation
-                # without a second read call.
-                raw = await resp.content.read(_MAX_RESPONSE_BYTES + 1)
+                # Stream the response in 64KB pieces and stop once we
+                # exceed the size cap. This handles chunked transfer
+                # encoding correctly (unlike resp.content.read(n),
+                # which returns after the first chunk) while also
+                # capping memory usage so a huge upstream response
+                # cannot OOM the process.
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.content.iter_chunked(65536):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > _MAX_RESPONSE_BYTES:
+                        break
+                raw = b"".join(chunks)
                 truncated = len(raw) > _MAX_RESPONSE_BYTES
                 if truncated:
                     raw = raw[:_MAX_RESPONSE_BYTES]

@@ -31,19 +31,45 @@ def _write_yaml(tmp_path, content: str):
 
 
 def _mock_streamed_response(data: bytes, status: int = 200) -> MagicMock:
-    """Create a mock aiohttp response with streaming content.read() support."""
+    """Create a mock aiohttp response with iter_chunked() support.
+
+    Simulates the production code path which streams via
+    resp.content.iter_chunked(). The data is yielded as a single
+    chunk by default; use _mock_multi_chunk_response() to simulate
+    multi-chunk delivery.
+    """
     mock_response = AsyncMock()
     mock_response.status = status
     mock_response.get_encoding = MagicMock(return_value="utf-8")
 
-    # Mock content.read() to return the data (capped by the requested size)
-    async def mock_read(n: int = -1) -> bytes:
-        if n < 0:
-            return data
-        return data[:n]
+    # Mock content.iter_chunked() as an async generator yielding
+    # the full body in one piece
+    async def _iter_chunked(_size: int = 65536):
+        yield data
 
     mock_response.content = MagicMock()
-    mock_response.content.read = AsyncMock(side_effect=mock_read)
+    mock_response.content.iter_chunked = _iter_chunked
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock(return_value=False)
+    return mock_response
+
+
+def _mock_multi_chunk_response(chunk_list: list[bytes], status: int = 200) -> MagicMock:
+    """Create a mock aiohttp response that yields multiple chunks.
+
+    Used to verify that iter_chunked() reassembles all chunks
+    into the complete response body.
+    """
+    mock_response = AsyncMock()
+    mock_response.status = status
+    mock_response.get_encoding = MagicMock(return_value="utf-8")
+
+    async def _iter_chunked(_size: int = 65536):
+        for chunk in chunk_list:
+            yield chunk
+
+    mock_response.content = MagicMock()
+    mock_response.content.iter_chunked = _iter_chunked
     mock_response.__aenter__ = AsyncMock(return_value=mock_response)
     mock_response.__aexit__ = AsyncMock(return_value=False)
     return mock_response
@@ -1018,6 +1044,89 @@ services:
 
         assert result.success is True
         # Body should be truncated to the cap
+        assert len(result.body) == _MAX_RESPONSE_BYTES
+
+    async def test_multi_chunk_response_reassembled(self, tmp_path, monkeypatch):
+        """Multiple chunks from iter_chunked() are joined into the full body.
+
+        APIs using chunked transfer encoding (like Perplexity) deliver
+        the response in multiple pieces. This test verifies all chunks
+        are collected and reassembled.
+        """
+        monkeypatch.setenv("API_KEY", "tok")
+        path = _write_yaml(
+            tmp_path,
+            """
+services:
+  testapi:
+    url: https://api.example.com
+    method: POST
+    auth:
+      type: bearer
+      env: API_KEY
+""",
+        )
+        load_services(path)
+
+        # Split a JSON body across three chunks, the way a chunked
+        # transfer encoding response would arrive
+        chunk1 = b'{"answer": "'
+        chunk2 = b"This is a complete"
+        chunk3 = b' response from a chunked API"}'
+        expected = chunk1 + chunk2 + chunk3
+        mock_response = _mock_multi_chunk_response([chunk1, chunk2, chunk3])
+        mock_session = MagicMock()
+        mock_session.request = MagicMock(return_value=mock_response)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("kai.services.aiohttp.ClientSession", return_value=mock_session):
+            result = await call_service("testapi", body={"query": "test"})
+
+        assert result.success is True
+        # All three chunks should be joined into the complete body
+        assert result.body == expected.decode("utf-8")
+
+    async def test_oversized_multi_chunk_truncated(self, tmp_path, monkeypatch):
+        """The streaming loop breaks early when multiple chunks exceed the cap.
+
+        Unlike test_oversized_response_truncated (single chunk), this
+        verifies the break fires mid-iteration when cumulative chunk
+        size crosses _MAX_RESPONSE_BYTES.
+        """
+        monkeypatch.setenv("API_KEY", "tok")
+        path = _write_yaml(
+            tmp_path,
+            """
+services:
+  testapi:
+    url: https://api.example.com
+    method: POST
+    auth:
+      type: bearer
+      env: API_KEY
+""",
+        )
+        load_services(path)
+
+        from kai.services import _MAX_RESPONSE_BYTES
+
+        # Three chunks whose total exceeds the cap. The loop should
+        # break after the second chunk pushes total past the limit.
+        half = _MAX_RESPONSE_BYTES // 2
+        remainder = _MAX_RESPONSE_BYTES - half + 500
+        chunks = [b"a" * half, b"b" * remainder, b"c" * 1000]
+        mock_response = _mock_multi_chunk_response(chunks)
+        mock_session = MagicMock()
+        mock_session.request = MagicMock(return_value=mock_response)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("kai.services.aiohttp.ClientSession", return_value=mock_session):
+            result = await call_service("testapi", body={"query": "test"})
+
+        assert result.success is True
+        # Body should be truncated to exactly the cap
         assert len(result.body) == _MAX_RESPONSE_BYTES
 
     async def test_response_encoding_respected(self, tmp_path, monkeypatch):

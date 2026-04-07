@@ -2010,6 +2010,52 @@ class TestApplySource:
         assert "IDENTITY.md" in output
         assert "dangle" in output
 
+    def test_copies_home_config(self, tmp_path):
+        """home/config/ is copied to the install tree (e.g. goose-config.yaml)."""
+        src = tmp_path / "source"
+        (src / "src").mkdir(parents=True)
+        (src / "src" / "module.py").write_text("code")
+        (src / "pyproject.toml").write_text("[project]")
+        # Create the config template directory. Note: no home/.claude/ in
+        # this fixture - we're isolating the config copy behavior.
+        config_dir = src / "home" / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "goose-config.yaml").write_text("extensions: []")
+        install = tmp_path / "install"
+        install.mkdir()
+
+        with (
+            patch("kai.install.PROJECT_ROOT", src),
+            patch("kai.install._copy_tree") as mock_copy,
+            patch("kai.install._set_ownership") as mock_own,
+            patch("shutil.copy2"),
+            patch("os.chown"),
+        ):
+            _apply_source(install, svc_uid=1000, svc_gid=1000, dry_run=False)
+
+        # Verify the specific home/config/ copy call rather than relying
+        # on total call count (which depends on fixture state).
+        config_dst = install / "home" / "config"
+        config_calls = [c for c in mock_copy.call_args_list if c[0][0] == config_dir and c[0][1] == config_dst]
+        assert len(config_calls) == 1
+
+        # home/config/ should be root-owned (static template, not runtime data)
+        own_calls = [c for c in mock_own.call_args_list if c[0] == (config_dst, 0, 0) and c[1].get("recursive") is True]
+        assert len(own_calls) == 1
+
+    def test_dry_run_includes_home_config(self, tmp_path, capsys):
+        """Dry run mentions home/config/ when it exists."""
+        src = tmp_path / "source"
+        config_dir = src / "home" / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "goose-config.yaml").write_text("extensions: []")
+        with patch("kai.install.PROJECT_ROOT", src):
+            _apply_source(tmp_path / "install", svc_uid=1000, svc_gid=1000, dry_run=True)
+        output = capsys.readouterr().out
+        assert "home/config" in output
+        # Should not create the directory during dry run
+        assert not (tmp_path / "install" / "home" / "config").exists()
+
 
 # ── _apply_models ────────────────────────────────────────────────────
 

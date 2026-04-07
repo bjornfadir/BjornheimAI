@@ -412,8 +412,11 @@ async def handle_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     models = _get_user_models(pool, chat_id, config)
 
     if models is None:
-        # Open-ended provider - no keyboard, show current model
-        current = pool.get_model(chat_id)
+        # Open-ended provider - no keyboard, show current model.
+        # Use get_effective_model() so the displayed model reflects
+        # persisted settings even before the first message (when no
+        # subprocess instance exists yet after a service restart).
+        current = await pool.get_effective_model(chat_id)
         await update.message.reply_text(
             f"Current model: {current}\nUse /model <id> to switch to any model your provider supports."
         )
@@ -421,7 +424,7 @@ async def handle_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await update.message.reply_text(
         "Choose a model:",
-        reply_markup=_models_keyboard(pool.get_model(chat_id), models),
+        reply_markup=_models_keyboard(await pool.get_effective_model(chat_id), models),
     )
 
 
@@ -473,7 +476,9 @@ async def handle_model_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Invalid model.")
         return
 
-    if model == pool.get_model(chat_id):
+    # Use get_effective_model so the comparison matches the keyboard highlight,
+    # which also uses get_effective_model to mark the active model.
+    if model == await pool.get_effective_model(chat_id):
         await query.answer()
         await query.edit_message_text("No change.", reply_markup=InlineKeyboardMarkup([]))
         return
@@ -744,7 +749,7 @@ async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
         ctx_src = "users.yaml"
     else:
         ctx_src = "global default"
-    ctx_label = f"{ctx_val:,} tokens" if ctx_val > 0 else "default"
+    ctx_label = f"{ctx_val:,} tokens" if ctx_val > 0 else "not set (model default)"
 
     # Budget ceiling - show when a positive ceiling exists so the user
     # knows their limit before hitting it. Falls through to the global

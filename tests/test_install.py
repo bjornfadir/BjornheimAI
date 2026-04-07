@@ -440,6 +440,7 @@ class TestCmdConfig:
                 "admin",  # admin display name
                 "false",  # advanced user options
                 "polling",  # transport
+                "claude",  # agent backend
                 "sonnet",  # model
                 "120",  # timeout
                 "10.0",  # budget
@@ -472,6 +473,8 @@ class TestCmdConfig:
         assert conf["env"]["CLAUDE_AUTOCOMPACT_PCT"] == "80"
         # ALLOWED_USER_IDS should not be in the env dict
         assert "ALLOWED_USER_IDS" not in conf["env"]
+        # Default backend should not appear in env (only non-default values)
+        assert "AGENT_BACKEND" not in conf["env"]
         # users.yaml should have been generated
         yaml_path = tmp_path / "users.yaml"
         assert yaml_path.exists()
@@ -499,6 +502,7 @@ class TestCmdConfig:
                 "testuser",  # os_user
                 str(tmp_path),  # home_workspace
                 "polling",  # transport
+                "claude",  # agent backend
                 "sonnet",  # model
                 "120",  # timeout
                 "10.0",  # budget
@@ -532,6 +536,53 @@ class TestCmdConfig:
         # CLAUDE_USER should not be in the env (skipped because os_user was set)
         conf = json.loads((tmp_path / "install.conf").read_text())
         assert "CLAUDE_USER" not in conf["env"]
+
+    def test_goose_backend_writes_env(self, tmp_path, monkeypatch):
+        """Selecting goose backend writes AGENT_BACKEND to env."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        inputs = iter(
+            [
+                "/opt/kai",  # install dir
+                "/var/lib/kai",  # data dir
+                "kai",  # service user
+                "darwin",  # platform
+                "fake-token",  # bot token
+                "12345",  # admin telegram ID
+                "admin",  # admin display name
+                "false",  # advanced user options
+                "polling",  # transport
+                "goose",  # agent backend
+                "sonnet",  # model
+                "120",  # timeout
+                "10.0",  # budget
+                "200000",  # max context window
+                "80",  # autocompact pct
+                "8080",  # port
+                "test-secret",  # webhook secret
+                "~/Projects",  # workspace base
+                "",  # allowed workspaces (empty)
+                "false",  # pr review enabled
+                "false",  # issue triage enabled
+                "",  # github notify chat id (empty)
+                "false",  # voice
+                "false",  # tts
+                "",  # claude user (empty)
+                "",  # perplexity key (empty)
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        conf = json.loads((tmp_path / "install.conf").read_text())
+        assert conf["env"]["AGENT_BACKEND"] == "goose"
+        # Provider API keys are not managed by Kai - they go directly
+        # into /etc/kai/env or the shell environment for Goose to read.
+        assert "ANTHROPIC_API_KEY" not in conf["env"]
 
     def test_reads_existing_defaults(self, tmp_path, monkeypatch, capsys):
         """Config subcommand uses existing install.conf values as defaults."""

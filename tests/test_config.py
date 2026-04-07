@@ -42,6 +42,7 @@ _CONFIG_ENV_VARS = [
     "TOTP_CHALLENGE_SECONDS",
     "TOTP_LOCKOUT_ATTEMPTS",
     "TOTP_LOCKOUT_MINUTES",
+    "AGENT_BACKEND",
     "KAI_DATA_DIR",
     "KAI_INSTALL_DIR",
 ]
@@ -94,6 +95,8 @@ class TestLoadConfigDefaults:
         # Context window tuning defaults to 0 (use Claude Code defaults)
         assert config.claude_max_context_window == 0
         assert config.claude_autocompact_pct == 0
+        # Agent backend default
+        assert config.agent_backend == "claude"
 
     def test_context_window_from_env(self, monkeypatch):
         _set_required(monkeypatch)
@@ -176,6 +179,13 @@ class TestLoadConfigErrors:
         _set_required(monkeypatch)
         monkeypatch.setenv("CLAUDE_MODEL", "sonet")
         with pytest.raises(SystemExit, match="CLAUDE_MODEL"):
+            load_config()
+
+    def test_invalid_agent_backend(self, monkeypatch):
+        """AGENT_BACKEND with an unrecognized value raises SystemExit."""
+        _set_required(monkeypatch)
+        monkeypatch.setenv("AGENT_BACKEND", "invalid")
+        with pytest.raises(SystemExit, match="AGENT_BACKEND"):
             load_config()
 
 

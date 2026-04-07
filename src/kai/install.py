@@ -38,7 +38,7 @@ from pathlib import Path
 
 import yaml
 
-from kai.config import MAX_CONTEXT_CEILING, PROJECT_ROOT, VALID_MODELS
+from kai.config import MAX_CONTEXT_CEILING, PROJECT_ROOT, VALID_BACKENDS, VALID_MODELS
 
 # Config file written by `config`, read by `apply`.
 # Anchored to PROJECT_ROOT so it resolves correctly regardless of CWD.
@@ -408,6 +408,18 @@ def _cmd_config() -> None:
         )
     print()
 
+    # -- Agent backend --
+    print("-- Agent backend --")
+    agent_backend = _prompt_choice(
+        "Agent backend",
+        sorted(VALID_BACKENDS),
+        existing_env.get("AGENT_BACKEND", "claude"),
+    )
+    if agent_backend == "goose":
+        print("  Note: Goose requires a provider API key (e.g. ANTHROPIC_API_KEY)")
+        print("  in the environment. Add it to /etc/kai/env after installation.")
+    print()
+
     # -- Claude --
     # When users.yaml exists, model/timeout/budget/context are per-user
     # settings managed via /settings commands or users.yaml fields.
@@ -627,6 +639,11 @@ def _cmd_config() -> None:
         "VOICE_ENABLED": str(voice_enabled).lower(),
         "TTS_ENABLED": str(tts_enabled).lower(),
     }
+
+    # Agent backend is truly global (one backend per deployment).
+    # Only write non-default values to keep the env file clean.
+    if agent_backend != "claude":
+        env["AGENT_BACKEND"] = agent_backend
 
     # Deprecated per-user vars: only include without users.yaml
     # (legacy single-user mode). With users.yaml, these are noise.
@@ -1461,14 +1478,18 @@ def _cmd_apply() -> None:
         # -- Step 5: Write secrets --
         _apply_secrets(env, dry_run)
 
-        # -- Step 6: Configure sudoers --
+        # -- Step 6: Deploy Goose config (if backend=goose) --
+        if env.get("AGENT_BACKEND") == "goose":
+            _apply_goose_config(service_user, install_path, svc_uid, svc_gid, dry_run)
+
+        # -- Step 7: Configure sudoers --
         claude_user = env.get("CLAUDE_USER") or None
         _apply_sudoers(service_user, dry_run, claude_user)
 
-        # -- Step 7: Migrate runtime data --
+        # -- Step 8: Migrate runtime data --
         _apply_migrate(data_path, install_path, svc_uid, svc_gid, dry_run)
 
-        # -- Step 8: Generate service definition --
+        # -- Step 9: Generate service definition --
         webhook_port = int(env.get("WEBHOOK_PORT", "8080"))
         _apply_service(install_dir, data_dir, service_user, platform, dry_run, webhook_port)
     except Exception:
@@ -1800,6 +1821,58 @@ def _apply_secrets(env: dict[str, str], dry_run: bool) -> None:
             os.chmod(yaml_dst, 0o600)
             os.chown(yaml_dst, 0, 0)
             print(f"  Copied {yaml_dst}")
+
+
+def _apply_goose_config(
+    service_user: str,
+    install_path: Path,
+    svc_uid: int,
+    svc_gid: int,
+    dry_run: bool,
+) -> None:
+    """
+    Deploy the Goose extension config to the service user's home.
+
+    Copies home/config/goose-config.yaml from the install tree to
+    ~/.config/goose/config.yaml so that `goose acp` picks up the
+    right extension settings. The directory is created if it does
+    not exist. Only called when AGENT_BACKEND=goose.
+    """
+    svc_home = Path(_user_home(service_user))
+    goose_dir = svc_home / ".config" / "goose"
+    dst = goose_dir / "config.yaml"
+    src = install_path / "home" / "config" / "goose-config.yaml"
+
+    # Check before dry_run so a missing template is caught during
+    # pre-validation, not only on the real install run.
+    if not src.exists():
+        raise SystemExit(f"Goose config template not found at {src}")
+
+    if dry_run:
+        print(f"[DRY RUN] Would create: {goose_dir}")
+        print(f"[DRY RUN] Would copy: {src} -> {dst}")
+        return
+
+    # Track whether we're creating .config for the first time so we
+    # can set ownership on it below. mkdir(parents=True) creates both
+    # .config/ and .config/goose/ if needed.
+    config_dir = svc_home / ".config"
+    config_dir_is_new = not config_dir.exists()
+
+    goose_dir.mkdir(parents=True, exist_ok=True)
+    # Own the .config/goose tree by the service user so Goose can
+    # write runtime state (session logs, etc.) alongside the config.
+    _set_ownership(goose_dir, svc_uid, svc_gid)
+    # Only chown .config itself if we just created it. An existing
+    # .config may be shared with other tools and should keep its
+    # current ownership.
+    if config_dir_is_new:
+        _set_ownership(config_dir, svc_uid, svc_gid)
+
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o644)
+    _set_ownership(dst, svc_uid, svc_gid)
+    print(f"  Deployed Goose config to {dst}")
 
 
 def _apply_sudoers(service_user: str, dry_run: bool, claude_user: str | None = None) -> None:

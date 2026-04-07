@@ -73,7 +73,7 @@ from kai.bot import (
     handle_workspace_callback,
     handle_workspaces,
 )
-from kai.config import Config
+from kai.config import PROVIDER_MODELS, Config
 from kai.tts import DEFAULT_VOICE, VOICES
 from kai.workspace_utils import is_workspace_allowed
 
@@ -405,7 +405,7 @@ def _make_callback_update(data="model:opus", chat_id=12345, user_id=1):
     return update
 
 
-def _make_mock_claude(model="sonnet", workspace=None, is_alive=True):
+def _make_mock_claude(model="sonnet", workspace=None, is_alive=True, provider="anthropic"):
     """Create a mock SubprocessPool with pool-compatible methods.
 
     Despite the name (kept for backward compatibility with existing test
@@ -422,6 +422,15 @@ def _make_mock_claude(model="sonnet", workspace=None, is_alive=True):
     pool.change_workspace = AsyncMock()
     pool.force_kill = AsyncMock()
     pool.send = MagicMock()  # configured per test
+    # Mock instance returned by pool.get() and pool.get_if_exists()
+    # with the provider attribute for provider-aware model selection.
+    instance = MagicMock()
+    instance.model = model
+    instance.provider = provider
+    instance.workspace = ws
+    instance.workspace_config = None
+    pool.get = MagicMock(return_value=instance)
+    pool.get_if_exists = MagicMock(return_value=instance)
     return pool
 
 
@@ -629,20 +638,23 @@ class TestEditMessageSafe:
 
 
 class TestModelsKeyboard:
+    # Use Anthropic's curated models for keyboard tests
+    _anthropic_models = PROVIDER_MODELS["anthropic"]
+
     def test_current_model_gets_green_dot(self):
-        kb = _models_keyboard("sonnet")
+        kb = _models_keyboard("sonnet", self._anthropic_models)
         labels = _button_labels(kb)
         assert any("\U0001f7e2" in lbl and "Sonnet" in lbl for lbl in labels)
 
     def test_all_models_present(self):
-        kb = _models_keyboard("sonnet")
+        kb = _models_keyboard("sonnet", self._anthropic_models)
         callbacks = _button_callbacks(kb)
         assert "model:opus" in callbacks
         assert "model:sonnet" in callbacks
         assert "model:haiku" in callbacks
 
     def test_callback_data_format(self):
-        kb = _models_keyboard("opus")
+        kb = _models_keyboard("opus", self._anthropic_models)
         callbacks = _button_callbacks(kb)
         assert all(c.startswith("model:") for c in callbacks)
 
@@ -897,6 +909,21 @@ class TestHandleModels:
         call = update.message.reply_text.call_args
         assert "Choose a model" in call[0][0]
         assert call[1]["reply_markup"] is not None
+
+    @pytest.mark.asyncio
+    async def test_open_ended_provider_shows_text(self):
+        """Open-ended provider (openrouter/ollama) shows text instead of keyboard."""
+        pool = _make_mock_claude(model="llama3", provider="ollama")
+        update = _make_update()
+        ctx = _make_context(claude=pool)
+        await handle_models(update, ctx)
+        call = update.message.reply_text.call_args
+        reply = call[0][0]
+        assert "Current model" in reply
+        assert "llama3" in reply
+        assert "/model" in reply
+        # No keyboard for open-ended providers
+        assert "reply_markup" not in call[1] or call[1].get("reply_markup") is None
 
 
 # ── handle_model ─────────────────────────────────────────────────────
@@ -3280,14 +3307,16 @@ class TestHandleSettings:
         """/settings with no overrides shows global defaults."""
         update = _make_update(text="/settings")
         config = _make_config()
+        ctx = _make_context(config=config)
         mock_sessions = self._mock_sessions()
 
         with self._patches(mock_sessions):
-            await _show_settings(update, 12345, config)
+            await _show_settings(update, ctx, 12345, config)
 
         reply = update.message.reply_text.call_args[0][0]
         assert "sonnet" in reply
         assert "global default" in reply
+        assert "anthropic" in reply.lower()
 
     # ── 2. Set model ───────────────────────────────────────────────
 
@@ -3600,7 +3629,7 @@ class TestHandleSettings:
             await handle_settings(update, ctx)
 
         # Instance model should be reverted to the config default
-        assert instance.model == config.claude_model
+        assert instance.model == config.default_model
 
     # ── 18. Reset all reverts all instance fields ─────────────────
 
@@ -3622,7 +3651,7 @@ class TestHandleSettings:
         with self._patches(mock_sessions):
             await handle_settings(update, ctx)
 
-        assert instance.model == config.claude_model
+        assert instance.model == config.default_model
         assert instance.max_budget_usd == config.claude_max_budget_usd
         assert instance.timeout_seconds == config.claude_timeout_seconds
         assert instance.max_context_window == config.claude_max_context_window
@@ -3634,10 +3663,11 @@ class TestHandleSettings:
         """Budget of $0.00 displays as 'unlimited', not '$0.00'."""
         update = _make_update(text="/settings")
         config = _make_config(claude_max_budget_usd=0.0)
+        ctx = _make_context(config=config)
         mock_sessions = self._mock_sessions()
 
         with self._patches(mock_sessions):
-            await _show_settings(update, 12345, config)
+            await _show_settings(update, ctx, 12345, config)
 
         reply = update.message.reply_text.call_args[0][0]
         assert "unlimited" in reply.lower()
@@ -3651,10 +3681,11 @@ class TestHandleSettings:
         update = _make_update(text="/settings")
         # No user_configs - ceiling should fall through to global default
         config = _make_config(claude_max_budget_usd=10.0)
+        ctx = _make_context(config=config)
         mock_sessions = self._mock_sessions()
 
         with self._patches(mock_sessions):
-            await _show_settings(update, 12345, config)
+            await _show_settings(update, ctx, 12345, config)
 
         reply = update.message.reply_text.call_args[0][0]
         assert "$10.00" in reply

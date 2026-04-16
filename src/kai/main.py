@@ -285,6 +285,26 @@ def main() -> None:
         except OSError:
             logging.warning("Could not bootstrap MEMORY.md", exc_info=True)
 
+        # Initialize semantic memory system (Mem0 + Qdrant).
+        # Non-fatal: if Mem0 fails to initialize (missing deps, disk error,
+        # model download failure), bot runs without semantic memory.
+        # Import is deferred so PyTorch/sentence-transformers (~300MB RAM)
+        # are not loaded when MEMORY_ENABLED=false.
+        if config.memory_enabled:
+            try:
+                from kai.memory import init_memory
+                from kai.memory import is_enabled as memory_is_enabled
+
+                init_memory(config)
+                # init_memory may silently disable memory (e.g. dimension
+                # mismatch) without raising. Check actual state.
+                if memory_is_enabled():
+                    logging.info("Semantic memory system initialized")
+                else:
+                    logging.warning("Semantic memory init completed but system is disabled")
+            except Exception:
+                logging.warning("Could not initialize semantic memory", exc_info=True)
+
         try:
             # Retry initialization if the network isn't ready yet (e.g. after a
             # power outage where DNS may take a while to come back).

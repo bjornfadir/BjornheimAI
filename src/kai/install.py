@@ -1441,6 +1441,19 @@ def _apply_migrate(data_path: Path, install_path: Path, svc_uid: int, svc_gid: i
         elif not copied and not dry_run:
             print("  Uploaded files already migrated or no files to copy")
 
+    # -- Memory directory ownership --
+    # Ensure the entire memory/ tree is owned by the service user.
+    # Subdirectories like qdrant/ are created at runtime by init_memory(),
+    # but if the service was ever started as root (e.g., a manual test run)
+    # or a prior install left stale ownership, those directories would be
+    # root-owned and the service user could not write to them.
+    memory_tree = data_path / "memory"
+    if memory_tree.is_dir():
+        if dry_run:
+            print(f"[DRY RUN] Would set ownership on {memory_tree} ({svc_uid}:{svc_gid})")
+        else:
+            _set_ownership(memory_tree, svc_uid, svc_gid, recursive=True)
+
 
 def _cmd_apply() -> None:
     """

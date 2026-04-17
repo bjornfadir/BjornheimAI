@@ -51,6 +51,9 @@ def _reset_memory_module():
 
     mem_mod._memory = None
     mem_mod._config = None
+    # Phase 3: clear per-user pending-write state so verification-window
+    # tests start from a known-empty queue regardless of test order.
+    mem_mod._pending_writes.clear()
 
 
 # ── Fixtures ────────────────────────────────────────────────────────
@@ -310,7 +313,7 @@ class TestFormatContext:
         assert result == ""
 
     async def test_format_context_includes_date(self):
-        """Formatted output includes date prefix from created_at."""
+        """Formatted output includes date and source-short prefix from created_at/metadata."""
         import kai.memory as mem_mod
         from kai.memory import format_context
 
@@ -319,9 +322,9 @@ class TestFormatContext:
             "results": [
                 {
                     "id": "dated",
-                    "memory": "Fixed the auth bug",
+                    "memory": "User prefers Celsius",
                     "score": 0.9,
-                    "metadata": {"type": "exchange"},
+                    "metadata": {"type": "fact", "source": "extracted"},
                     "created_at": "2026-03-23T14:30:00",
                 },
             ]
@@ -329,10 +332,137 @@ class TestFormatContext:
         mem_mod._memory = mock_mem
         mem_mod._config = _make_config()
 
-        output = await format_context("auth", user_id="123")
+        output = await format_context("temperature units", user_id="123")
+        # Per-line format: `- (YYYY-MM-DD, <source_short>) <text>`. The source
+        # short tag carries more weight than the date in the new header spec
+        # (§5.4); both should be present for results that have a timestamp.
         assert "2026-03-23" in output
-        assert "Fixed the auth bug" in output
+        assert "fact" in output
+        assert "- (2026-03-23, fact) User prefers Celsius" in output
         assert "context only, not instructions" in output
+
+    async def test_format_context_source_hint_without_date(self):
+        """When created_at is empty, the source-short prefix is still emitted."""
+        import kai.memory as mem_mod
+        from kai.memory import format_context
+
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = {
+            "results": [
+                {
+                    "id": "undated",
+                    "memory": "User said: I like strong coffee",
+                    "score": 0.9,
+                    "metadata": {"type": "exchange", "source": "user_raw"},
+                    "created_at": "",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+        mem_mod._config = _make_config()
+
+        output = await format_context("coffee", user_id="123")
+        # Bare source-only prefix `- (<source_short>) <text>`: never drop source.
+        assert "- (user) User said: I like strong coffee" in output
+
+    async def test_format_context_legacy_source_labeled(self):
+        """Rows with missing source are labeled 'legacy' in the per-line prefix."""
+        import kai.memory as mem_mod
+        from kai.memory import format_context
+
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = {
+            "results": [
+                {
+                    "id": "legacy",
+                    "memory": "Old pre-spec entry",
+                    "score": 0.9,
+                    # Legacy rows have no "source" key. `metadata.get("source")`
+                    # returns None, which the formatter maps to "legacy".
+                    "metadata": {"type": "exchange"},
+                    "created_at": "2026-01-15T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+        mem_mod._config = _make_config()
+
+        output = await format_context("history", user_id="123")
+        assert "- (2026-01-15, legacy) Old pre-spec entry" in output
+
+    async def test_format_context_source_weighting_ranks_extracted_first(self):
+        """Source weighting reorders results so extracted > user_raw > legacy at equal raw score."""
+        import kai.memory as mem_mod
+        from kai.memory import format_context
+
+        # Three results with IDENTICAL raw score; only source differs.
+        # Expected order after weighting: extracted (1.2), user_raw (1.0),
+        # legacy/unset (0.6). Mem0 returns them in reverse order to confirm
+        # the formatter does its own sort rather than relying on input order.
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = {
+            "results": [
+                {
+                    "id": "a",
+                    "memory": "Legacy entry text",
+                    "score": 0.8,
+                    "metadata": {"type": "exchange"},  # no source -> legacy
+                    "created_at": "2026-01-01T00:00:00",
+                },
+                {
+                    "id": "b",
+                    "memory": "User said: I use vim",
+                    "score": 0.8,
+                    "metadata": {"type": "exchange", "source": "user_raw"},
+                    "created_at": "2026-02-01T00:00:00",
+                },
+                {
+                    "id": "c",
+                    "memory": "User prefers vim for editing",
+                    "score": 0.8,
+                    "metadata": {"type": "fact", "source": "extracted"},
+                    "created_at": "2026-03-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+        mem_mod._config = _make_config()
+
+        output = await format_context("editor", user_id="123")
+        lines = output.splitlines()[1:]  # skip header
+
+        # The formatter should walk in adjusted-score order. At equal raw
+        # score the order is fixed by weight: extracted (1.2), user_raw (1.0),
+        # legacy (0.6).
+        assert "User prefers vim for editing" in lines[0]
+        assert "User said: I use vim" in lines[1]
+        assert "Legacy entry text" in lines[2]
+
+    async def test_format_context_weighting_never_rescues_subthreshold(self):
+        """A sub-threshold extracted row stays filtered even after weighting."""
+        import kai.memory as mem_mod
+        from kai.memory import format_context
+
+        # raw_score 0.25 < _MIN_RELEVANCE_THRESHOLD (0.3); boosting by 1.2
+        # yields 0.30, but weighting happens AFTER the filter (§5.3) so this
+        # row never reaches the walk. Result must be empty.
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = {
+            "results": [
+                {
+                    "id": "sub",
+                    "memory": "Borderline extracted fact",
+                    "score": 0.25,
+                    "metadata": {"type": "fact", "source": "extracted"},
+                    "created_at": "2026-04-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+        mem_mod._config = _make_config()
+
+        output = await format_context("anything", user_id="123")
+        assert output == ""
 
     async def test_format_context_disabled_returns_empty(self):
         """Returns empty string when memory is not initialized."""
@@ -342,49 +472,46 @@ class TestFormatContext:
         assert result == ""
 
 
-class TestAddExchange:
-    """Tests for add_exchange() ingestion."""
+class TestAddUserUtterance:
+    """Tests for add_user_utterance() Track 1 ingestion (spec §6.2)."""
 
-    def test_add_exchange_disabled_noop(self):
-        """add_exchange() is a no-op when memory is disabled."""
-        from kai.memory import add_exchange
+    def test_add_user_utterance_disabled_noop(self):
+        """add_user_utterance() is a no-op when memory is disabled."""
+        from kai.memory import add_user_utterance
 
         # Should not raise - just returns immediately
-        asyncio.run(add_exchange("hello", "hi there", user_id="123"))
+        asyncio.run(add_user_utterance("hello", user_id="123"))
 
-    def test_add_exchange_truncates_long_response(self):
-        """Long assistant text is truncated to ~1000 chars."""
+    def test_add_user_utterance_truncates_long_input(self):
+        """User text over _MAX_USER_CHARS is truncated to keep the embedding focused."""
         import kai.memory as mem_mod
-        from kai.memory import add_exchange
+        from kai.memory import add_user_utterance
 
         mock_mem = MagicMock()
-        # Make add() a regular function (not coroutine)
         mock_mem.add = MagicMock()
         mem_mod._memory = mock_mem
 
         long_text = "x" * 5000
-        asyncio.run(add_exchange("question", long_text, user_id="123"))
+        asyncio.run(add_user_utterance(long_text, user_id="123"))
 
-        # Verify add was called with truncated text
+        # Stored text is "User said: " + 2000 chars + "..." - well under 5000.
         call_args = mock_mem.add.call_args
-        stored_text = call_args[0][0]  # First positional arg
-        # "User: question\nAssistant: " + 1000 chars + "..."
-        assert len(stored_text) < 1100
+        stored_text = call_args[0][0]
+        assert len(stored_text) < 2100
         assert stored_text.endswith("...")
 
-    def test_add_exchange_metadata_stored(self):
-        """Exchange metadata includes type and session_id."""
+    def test_add_user_utterance_metadata_stored(self):
+        """Metadata records source=user_raw, type=exchange, and session_id."""
         import kai.memory as mem_mod
-        from kai.memory import add_exchange
+        from kai.memory import add_user_utterance
 
         mock_mem = MagicMock()
         mock_mem.add = MagicMock()
         mem_mod._memory = mock_mem
 
         asyncio.run(
-            add_exchange(
+            add_user_utterance(
                 "hello",
-                "hi",
                 user_id="123",
                 session_id="sess-abc",
             )
@@ -392,20 +519,384 @@ class TestAddExchange:
 
         call_kwargs = mock_mem.add.call_args[1]
         assert call_kwargs["infer"] is False
+        assert call_kwargs["metadata"]["source"] == "user_raw"
         assert call_kwargs["metadata"]["type"] == "exchange"
         assert call_kwargs["metadata"]["session_id"] == "sess-abc"
 
-    def test_add_exchange_handles_exception(self):
-        """Exceptions in add_exchange are caught, not propagated."""
+    def test_add_user_utterance_does_not_include_assistant_text(self):
+        """The stored embedding must contain only user text - no assistant text is accepted."""
+        import inspect
+
         import kai.memory as mem_mod
-        from kai.memory import add_exchange
+        from kai.memory import add_user_utterance
+
+        # The function signature must not accept an assistant_text parameter.
+        # This is the structural guarantee that prevents the v1 feedback loop
+        # (assistant hallucinations re-surfaced as retrievable memory).
+        sig = inspect.signature(add_user_utterance)
+        assert "assistant_text" not in sig.parameters
+
+        mock_mem = MagicMock()
+        mock_mem.add = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(
+            add_user_utterance(
+                "how is the weather",
+                user_id="123",
+                session_id="sess-no-assistant",
+            )
+        )
+
+        stored_text = mock_mem.add.call_args[0][0]
+        # The "User said: " prefix plus the user text is all that should be present.
+        assert stored_text == "User said: how is the weather"
+
+    def test_add_user_utterance_handles_exception(self):
+        """Exceptions in add_user_utterance are caught, not propagated."""
+        import kai.memory as mem_mod
+        from kai.memory import add_user_utterance
 
         mock_mem = MagicMock()
         mock_mem.add.side_effect = RuntimeError("disk full")
         mem_mod._memory = mock_mem
 
         # Should not raise
-        asyncio.run(add_exchange("hello", "hi", user_id="123"))
+        asyncio.run(add_user_utterance("hello", user_id="123"))
+
+
+# ── Phase 3: verification-delay (spec §5.2) ─────────────────────────
+
+
+class TestCorrectionCueRegex:
+    """_is_correction_cue covers the spec §5.2 regex. These tests pin
+    the match surface so a future regex refactor cannot silently widen
+    or narrow retraction detection."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Each of the 8 cue roots, standalone.
+            "no",
+            "nope",
+            "wait",
+            "actually",
+            "forget",
+            "ignore",
+            # Two-word cues.
+            "never mind",
+            "that's wrong",
+            "thats wrong",
+            # Real-world phrasings.
+            "No, that's wrong",
+            "actually, I meant Paris",
+            "Wait, let me rephrase",
+            "forget it",
+            "Never mind, use London",
+            "ignore that last part",
+            # Leading whitespace is fine.
+            "  no",
+            "\twait",
+        ],
+    )
+    def test_matches_expected_cues(self, text):
+        from kai.memory import _is_correction_cue
+
+        assert _is_correction_cue(text), f"expected match for {text!r}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "yes please",
+            "sure",
+            "noise from the fan",  # substring "no" but word-boundary stops it
+            "nopeandgo",  # no word boundary after "nope"
+            "waiter",  # word-char follows "wait"
+            "actualization",  # word-char follows "actually"
+            "forgetting the point",  # word-char follows "forget"
+            "ignored the email",  # word-char follows "ignore"
+            "I think that's great",  # "that's" without " wrong"
+            "minding my business",  # "mind" without "never "
+        ],
+    )
+    def test_rejects_non_cues(self, text):
+        from kai.memory import _is_correction_cue
+
+        assert not _is_correction_cue(text), f"unexpected match for {text!r}"
+
+    def test_case_insensitive(self):
+        """All cues match regardless of case (user's shift key is
+        unreliable evidence of intent)."""
+        from kai.memory import _is_correction_cue
+
+        assert _is_correction_cue("NEVER MIND")
+        assert _is_correction_cue("Never Mind")
+        assert _is_correction_cue("NO")
+        assert _is_correction_cue("Actually")
+
+    def test_non_string_input_returns_false(self):
+        """Defensive: the bot path always passes str, but a mis-typed
+        caller should not crash the memory layer."""
+        from kai.memory import _is_correction_cue
+
+        assert _is_correction_cue(None) is False
+        assert _is_correction_cue(42) is False
+        assert _is_correction_cue([]) is False
+
+
+class TestSubmitUserUtterance:
+    """§5.2 one-turn verification window: turns are queued, then either
+    flushed on the next non-correction turn or dropped on a correction
+    cue. submit_user_utterance is the turn-entry API."""
+
+    def test_disabled_is_noop_and_no_pending(self):
+        """When memory is disabled, submit_user_utterance must not
+        populate _pending_writes (would leak unbounded on installs
+        that never enable memory)."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        assert mem_mod._memory is None  # fixture guarantee
+        asyncio.run(submit_user_utterance("hello", user_id="u1"))
+        assert mem_mod._pending_writes == {}
+
+    def test_first_turn_queues_no_flush(self):
+        """The first turn from a user is queued only; no Mem0 write."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("first turn", user_id="u1", session_id="s1"))
+
+        # The pending dict now holds this turn.
+        assert "u1" in mem_mod._pending_writes
+        assert mem_mod._pending_writes["u1"].user_text == "first turn"
+        assert mem_mod._pending_writes["u1"].session_id == "s1"
+        # And NOTHING was written to Mem0.
+        mock_mem.add.assert_not_called()
+
+    def test_second_non_correction_turn_flushes_previous(self):
+        """Previous pending turn flushes on the next non-correction turn."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("first", user_id="u1", session_id="s1"))
+        asyncio.run(submit_user_utterance("second", user_id="u1", session_id="s2"))
+
+        # The first turn was flushed through add_user_utterance.
+        assert mock_mem.add.call_count == 1
+        stored_text = mock_mem.add.call_args[0][0]
+        assert stored_text == "User said: first"
+        # Session id on the flushed row comes from the PENDING turn
+        # (s1), not the current turn (s2) - proves the pending object
+        # carries its own session_id through to the write.
+        assert mock_mem.add.call_args[1]["metadata"]["session_id"] == "s1"
+        # And now the second turn is pending.
+        assert mem_mod._pending_writes["u1"].user_text == "second"
+        assert mem_mod._pending_writes["u1"].session_id == "s2"
+
+    def test_correction_cue_drops_previous_and_does_not_queue(self):
+        """Correction cue drops M_n without storing it AND does not
+        queue M_{n+1} (the cue itself is not a retrievable fact)."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("I live in London", user_id="u1"))
+        asyncio.run(submit_user_utterance("Actually, I meant Paris", user_id="u1"))
+
+        # Previous turn was NOT written.
+        mock_mem.add.assert_not_called()
+        # And the cue itself did NOT get queued.
+        assert "u1" not in mem_mod._pending_writes
+
+    def test_correction_with_no_pending_is_silent(self):
+        """A lone correction cue (no previous pending turn) is a
+        no-op. Does not raise, does not store, does not queue."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("no wait", user_id="u1"))
+
+        mock_mem.add.assert_not_called()
+        assert "u1" not in mem_mod._pending_writes
+
+    def test_three_turns_two_flushes(self):
+        """Three non-correction turns: first two flush, third is pending."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("turn A", user_id="u1"))
+        asyncio.run(submit_user_utterance("turn B", user_id="u1"))
+        asyncio.run(submit_user_utterance("turn C", user_id="u1"))
+
+        # A and B were flushed (in order); C is pending.
+        assert mock_mem.add.call_count == 2
+        texts = [call[0][0] for call in mock_mem.add.call_args_list]
+        assert texts == ["User said: turn A", "User said: turn B"]
+        assert mem_mod._pending_writes["u1"].user_text == "turn C"
+
+    def test_concurrent_submits_do_not_double_flush(self):
+        """Round 6 review finding #2: the old pending entry must leave
+        _pending_writes BEFORE the add_user_utterance await, so a second
+        submit task for the same user that wakes during the flush cannot
+        find the same PendingWrite and flush it a second time. Verified
+        by stubbing add_user_utterance with a coroutine that pauses on an
+        event while a second submit enters and inspects the dict state."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        gate = asyncio.Event()
+        flush_started = asyncio.Event()
+        flush_args: list[str] = []
+
+        async def blocking_flush(*, user_text, user_id, session_id):
+            # Runs in place of the real add_user_utterance. Records the
+            # flushed text and blocks on `gate` so the second submit can
+            # race against it while the first is mid-await.
+            flush_args.append(user_text)
+            flush_started.set()
+            await gate.wait()
+
+        mem_mod._memory = MagicMock()  # keep memory "enabled" so submit runs
+
+        async def race() -> None:
+            with patch.object(mem_mod, "add_user_utterance", blocking_flush):
+                # Seed the pending entry (no flush yet - no prior pending).
+                await submit_user_utterance("pending-A", user_id="u1", session_id="s1")
+                # Task A triggers a flush of pending-A and blocks.
+                task_a = asyncio.create_task(submit_user_utterance("next-A", user_id="u1", session_id="s2"))
+                await flush_started.wait()
+                # Mid-flush invariant: the popped entry must be gone from
+                # the dict. If the code used .get(), pending-A would
+                # still be visible here and the next submit would re-flush
+                # it. The assertion is the teeth of the test - without
+                # pop(), this line fires.
+                current = mem_mod._pending_writes.get("u1")
+                assert current is None or current.user_text != "pending-A"
+                # Task B enters while A is still blocked. B sees no
+                # pending-A to flush, so its own flush_args entry (if any)
+                # must not be "pending-A".
+                task_b = asyncio.create_task(submit_user_utterance("next-B", user_id="u1", session_id="s3"))
+                await asyncio.sleep(0)
+                gate.set()
+                await task_a
+                await task_b
+
+        asyncio.run(race())
+
+        # Exactly one flush of pending-A. No duplicate even though two
+        # submits ran concurrently during the flush window.
+        assert flush_args.count("pending-A") == 1
+
+    def test_multi_user_isolation(self):
+        """User A's pending write is not affected by user B's correction.
+        Per-user state must be keyed strictly on user_id."""
+        import kai.memory as mem_mod
+        from kai.memory import submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("A's fact", user_id="user-A"))
+        asyncio.run(submit_user_utterance("B's fact", user_id="user-B"))
+        # user-B retracts. user-A's pending write must survive.
+        asyncio.run(submit_user_utterance("never mind", user_id="user-B"))
+
+        # user-A still has a pending write; user-B does not.
+        assert mem_mod._pending_writes["user-A"].user_text == "A's fact"
+        assert "user-B" not in mem_mod._pending_writes
+        # Neither user had a flush yet (each has seen at most one
+        # non-correction turn followed by nothing or a correction).
+        mock_mem.add.assert_not_called()
+
+
+class TestFlushPending:
+    """flush_pending is the session-end hook. Must write pending rows
+    to Mem0 and return a useful boolean."""
+
+    def test_flush_writes_pending_and_returns_true(self):
+        import kai.memory as mem_mod
+        from kai.memory import flush_pending, submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("pending turn", user_id="u1", session_id="s1"))
+        result = asyncio.run(flush_pending("u1"))
+
+        assert result is True
+        assert mock_mem.add.call_count == 1
+        assert mock_mem.add.call_args[0][0] == "User said: pending turn"
+        # After flush, the dict entry is gone.
+        assert "u1" not in mem_mod._pending_writes
+
+    def test_flush_nothing_pending_returns_false(self):
+        """No pending write -> flush is a no-op returning False."""
+        import kai.memory as mem_mod
+        from kai.memory import flush_pending
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        result = asyncio.run(flush_pending("u1"))
+
+        assert result is False
+        mock_mem.add.assert_not_called()
+
+    def test_flush_one_user_leaves_others_untouched(self):
+        """Multi-user isolation on the session-end path."""
+        import kai.memory as mem_mod
+        from kai.memory import flush_pending, submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("A pending", user_id="A"))
+        asyncio.run(submit_user_utterance("B pending", user_id="B"))
+        result = asyncio.run(flush_pending("A"))
+
+        assert result is True
+        # A flushed, B still pending.
+        assert "A" not in mem_mod._pending_writes
+        assert mem_mod._pending_writes["B"].user_text == "B pending"
+
+
+class TestDropPending:
+    """drop_pending silently discards without writing. Administrative
+    and test helper; not called from the normal turn path."""
+
+    def test_drop_returns_true_when_pending(self):
+        import kai.memory as mem_mod
+        from kai.memory import drop_pending, submit_user_utterance
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        asyncio.run(submit_user_utterance("x", user_id="u1"))
+        assert drop_pending("u1") is True
+        assert "u1" not in mem_mod._pending_writes
+        # No write happened.
+        mock_mem.add.assert_not_called()
+
+    def test_drop_returns_false_when_empty(self):
+        from kai.memory import drop_pending
+
+        assert drop_pending("no-such-user") is False
 
 
 class TestGetAll:
@@ -469,6 +960,173 @@ class TestDeleteAll:
         mock_mem.delete_all.assert_called_once_with(user_id="user-abc")
 
 
+class TestDeleteBySource:
+    """Tests for delete_by_source() scoped delete primitive (spec §6.2)."""
+
+    def test_delete_by_source_disabled_returns_zero(self):
+        """delete_by_source returns 0 when memory is disabled; never raises."""
+        from kai.memory import delete_by_source
+
+        assert asyncio.run(delete_by_source("user-a", "extracted")) == 0
+
+    def test_delete_by_source_deletes_only_matching_source(self):
+        """Only rows whose metadata source equals `source` are deleted."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        mock_mem = MagicMock()
+        # Three rows: two extracted, one user_raw. Expect two deletes and
+        # zero touches on the user_raw row's id.
+        mock_mem.get_all.return_value = {
+            "results": [
+                {"id": "e1", "metadata": {"source": "extracted"}},
+                {"id": "u1", "metadata": {"source": "user_raw"}},
+                {"id": "e2", "metadata": {"source": "extracted"}},
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        count = asyncio.run(delete_by_source("user-a", "extracted"))
+
+        assert count == 2
+        deleted_ids = {call.kwargs["memory_id"] for call in mock_mem.delete.call_args_list}
+        assert deleted_ids == {"e1", "e2"}
+        # user_raw row must not have been deleted.
+        assert "u1" not in deleted_ids
+
+    def test_delete_by_source_empty_string_matches_legacy_and_empty(self):
+        """source='' matches rows with missing metadata, absent source key, and empty-string source."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                # Row 1: metadata key absent entirely (pre-spec rows).
+                {"id": "legacy-no-meta"},
+                # Row 2: metadata dict present but "source" key missing.
+                {"id": "legacy-no-src", "metadata": {"type": "exchange"}},
+                # Row 3: explicit empty-string source.
+                {"id": "empty-src", "metadata": {"source": ""}},
+                # Row 4: a real source value - should NOT be deleted.
+                {"id": "keep-me", "metadata": {"source": "extracted"}},
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        count = asyncio.run(delete_by_source("user-a", ""))
+
+        assert count == 3
+        deleted_ids = {call.kwargs["memory_id"] for call in mock_mem.delete.call_args_list}
+        assert deleted_ids == {"legacy-no-meta", "legacy-no-src", "empty-src"}
+        assert "keep-me" not in deleted_ids
+
+    def test_delete_by_source_tolerates_valueerror(self):
+        """ValueError from Mem0.delete is swallowed mid-loop; remaining matches still delete."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                {"id": "gone", "metadata": {"source": "extracted"}},
+                {"id": "still-there", "metadata": {"source": "extracted"}},
+            ]
+        }
+        # First delete raises ValueError (simulating an already-gone id under
+        # concurrent cleanup); second delete succeeds. Count reflects only
+        # successful deletes.
+        mock_mem.delete.side_effect = [ValueError("not found"), None]
+        mem_mod._memory = mock_mem
+
+        count = asyncio.run(delete_by_source("user-a", "extracted"))
+
+        assert count == 1
+        assert mock_mem.delete.call_count == 2
+
+    def test_delete_by_source_drains_multiple_pages(self, monkeypatch):
+        """The loop keeps calling get_all until a short page or non-match page terminates it."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        # Shrink page size instead of synthesizing 20k rows. The spec calls
+        # out this monkeypatch approach explicitly (§13.1).
+        monkeypatch.setattr(mem_mod, "_DELETE_PAGE_SIZE", 4)
+
+        mock_mem = MagicMock()
+        full_page = [{"id": f"p1-{i}", "metadata": {"source": "extracted"}} for i in range(4)]
+        partial_page = [
+            {"id": "p2-0", "metadata": {"source": "extracted"}},
+            {"id": "p2-1", "metadata": {"source": "extracted"}},
+        ]
+        # Round 1: full page of matches -> drain + loop continues.
+        # Round 2: partial page (len < page size) -> terminates after delete.
+        mock_mem.get_all.side_effect = [
+            {"results": full_page},
+            {"results": partial_page},
+        ]
+        mem_mod._memory = mock_mem
+
+        count = asyncio.run(delete_by_source("user-a", "extracted"))
+
+        assert count == 6
+        assert mock_mem.get_all.call_count == 2
+
+    def test_delete_by_source_live_lock_guard_on_full_non_matching_page(self, monkeypatch):
+        """A full page with zero matches terminates the loop (live-lock guard)."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        monkeypatch.setattr(mem_mod, "_DELETE_PAGE_SIZE", 4)
+
+        mock_mem = MagicMock()
+        # Full page (len == _DELETE_PAGE_SIZE) but zero rows match. Without
+        # the live-lock guard, the loop would spin on the same page forever
+        # because Mem0's get_all is cursor-less.
+        mock_mem.get_all.return_value = {
+            "results": [{"id": f"u-{i}", "metadata": {"source": "user_raw"}} for i in range(4)]
+        }
+        mem_mod._memory = mock_mem
+
+        count = asyncio.run(delete_by_source("user-a", "extracted"))
+
+        assert count == 0
+        # Exactly one call; the guard fires immediately on the non-matching page.
+        assert mock_mem.get_all.call_count == 1
+
+    def test_delete_by_source_tail_miss_emits_explicit_warning(self, monkeypatch, caplog):
+        """PR #333 review finding #3. The live-lock termination path is
+        also a correctness-loss path: if matching rows exist PAST the
+        first _DELETE_PAGE_SIZE non-matching rows in Mem0's row order,
+        they are not deleted. Operators need to see an explicit log
+        line for this case; the generic page-drain warning is not
+        enough to distinguish 'completed normally' from 'terminated
+        early, possible tail miss'."""
+        import logging
+
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_source
+
+        monkeypatch.setattr(mem_mod, "_DELETE_PAGE_SIZE", 4)
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [{"id": f"u-{i}", "metadata": {"source": "user_raw"}} for i in range(4)]
+        }
+        mem_mod._memory = mock_mem
+
+        with caplog.at_level(logging.WARNING, logger="kai.memory"):
+            asyncio.run(delete_by_source("user-a", "extracted"))
+
+        # The warning must name the tail-miss specifically; a generic
+        # drain message would not help an operator diagnose an
+        # incomplete delete after the fact.
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "Possible incomplete delete" in joined
+        assert "user-a" in joined
+        assert "'extracted'" in joined
+
+
 class TestGetStats:
     """Tests for get_stats()."""
 
@@ -508,7 +1166,7 @@ class TestMemoryIntegration:
     """End-to-end tests with a real Mem0 instance and Qdrant storage."""
 
     def test_add_and_search(self, real_memory_instance):
-        """Add an exchange, then search for it by semantic similarity."""
+        """Add a user utterance, then search for it by semantic similarity."""
         import kai.memory as mem_mod
 
         mem_mod._memory = real_memory_instance
@@ -519,11 +1177,9 @@ class TestMemoryIntegration:
         # Clean slate
         real_memory_instance.delete_all(user_id=user_id)
 
-        # Add an exchange
         asyncio.run(
-            mem_mod.add_exchange(
+            mem_mod.add_user_utterance(
                 "How do I set up the webhook server?",
-                "Run make run to start the aiohttp server on port 8080.",
                 user_id=user_id,
             )
         )
@@ -544,19 +1200,20 @@ class TestMemoryIntegration:
         user_id = "integration-ranking"
         real_memory_instance.delete_all(user_id=user_id)
 
-        # Add three exchanges on different topics
-        exchanges = [
-            ("What is the weather today?", "It is sunny and 72F in Toronto."),
-            ("How do I deploy to production?", "Run sudo make install to deploy to /opt/kai/."),
-            ("What is for dinner?", "How about pasta with garlic bread?"),
+        # Add three user-only utterances on different topics. Previous
+        # versions stored assistant text too; that is no longer permitted
+        # (spec §6.2) so the test exercises only user side text.
+        user_utterances = [
+            "What is the weather today?",
+            "How do I deploy to production?",
+            "What is for dinner?",
         ]
-        for user_text, assistant_text in exchanges:
-            asyncio.run(mem_mod.add_exchange(user_text, assistant_text, user_id=user_id))
+        for user_text in user_utterances:
+            asyncio.run(mem_mod.add_user_utterance(user_text, user_id=user_id))
 
-        # Search for deployment - should rank the deploy exchange first
+        # Search for deployment - should rank the deploy utterance first
         results = mem_mod.search("production deployment process", user_id=user_id)
         assert len(results) >= 1
-        # The top result should be about deployment
         assert "deploy" in results[0].text.lower() or "production" in results[0].text.lower()
 
     def test_multi_user_isolation(self, real_memory_instance):
@@ -571,11 +1228,9 @@ class TestMemoryIntegration:
         real_memory_instance.delete_all(user_id=user_a)
         real_memory_instance.delete_all(user_id=user_b)
 
-        # Add a memory for user A only
         asyncio.run(
-            mem_mod.add_exchange(
+            mem_mod.add_user_utterance(
                 "My secret project is called Phoenix.",
-                "Got it, I will remember Phoenix.",
                 user_id=user_a,
             )
         )
@@ -595,9 +1250,8 @@ class TestMemoryIntegration:
         user_id = "integration-get-delete"
         real_memory_instance.delete_all(user_id=user_id)
 
-        # Add some exchanges
         for i in range(3):
-            asyncio.run(mem_mod.add_exchange(f"Question {i}", f"Answer {i}", user_id=user_id))
+            asyncio.run(mem_mod.add_user_utterance(f"Question {i}", user_id=user_id))
 
         # get_all should return them
         all_memories = mem_mod.get_all(user_id=user_id)
@@ -618,9 +1272,8 @@ class TestMemoryIntegration:
         user_id = "integration-format"
         real_memory_instance.delete_all(user_id=user_id)
 
-        await mem_mod.add_exchange(
+        await mem_mod.add_user_utterance(
             "The Mac mini has 16GB RAM",
-            "Noted - 16GB RAM on the Mac mini.",
             user_id=user_id,
         )
 
@@ -757,6 +1410,40 @@ class TestAddStructured:
         result = add_structured("test", user_id="123")
         assert result == "mem-uuid-123"
         assert isinstance(result, str)
+
+    def test_bare_dict_return_shape_yields_id(self):
+        """Some Mem0 versions return the memory dict directly instead of
+        wrapping it in `{"results": [...]}`. Round 7 review surfaced the
+        upstream concern: _store_facts relies on add_structured returning
+        truthy on success to count facts, so both shapes must resolve to
+        a non-None id. This test covers the bare-dict fallback branch."""
+        import kai.memory as mem_mod
+        from kai.memory import add_structured
+
+        mock_mem = MagicMock()
+        mock_mem.add.return_value = {"id": "mem-uuid-bare", "memory": "test"}
+        mem_mod._memory = mock_mem
+
+        result = add_structured("test", user_id="123")
+        assert result == "mem-uuid-bare"
+
+    def test_unexpected_return_shape_yields_none(self):
+        """Defensive: if a future Mem0 version returns something the
+        unwrap logic does not recognize (a list, a bare string, a
+        non-dict scalar), add_structured returns None rather than
+        crashing. _store_facts treats None as "not actually stored" and
+        simply under-counts in the log - never raises. Round 7 review
+        noted that silent miscounting would be the failure mode; this
+        test pins the current defensive behavior."""
+        import kai.memory as mem_mod
+        from kai.memory import add_structured
+
+        mock_mem = MagicMock()
+        mem_mod._memory = mock_mem
+
+        for unexpected in (None, [], "raw-string-id", 42):
+            mock_mem.add.return_value = unexpected
+            assert add_structured("test", user_id="123") is None
 
     def test_mem0_failure_returns_none_and_logs(self, caplog):
         """Mem0 add() exceptions are caught, logged, and return None."""

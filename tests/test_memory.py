@@ -34,12 +34,20 @@ _BASE_CONFIG = Config(
 
 
 def _make_config(*, enabled: bool = True, **overrides) -> Config:
-    """Build a Config with memory settings for testing."""
+    """Build a Config with memory settings for testing.
+
+    The memory_search_floor default mirrors the production default (0.3,
+    matching the prior hard-coded `_MIN_RELEVANCE_THRESHOLD` constant).
+    Tests that exercise the floor explicitly should pass a different
+    `memory_search_floor=...` override; everything else inherits 0.3 so
+    the existing threshold tests continue to assert the same behavior.
+    """
     defaults = {
         "memory_enabled": enabled,
         "memory_search_limit": 10,
         "memory_token_budget": 2000,
         "memory_embedding_model": "all-MiniLM-L6-v2",
+        "memory_search_floor": 0.3,
     }
     defaults.update(overrides)
     return replace(_BASE_CONFIG, **defaults)
@@ -443,7 +451,7 @@ class TestFormatContext:
         import kai.memory as mem_mod
         from kai.memory import format_context
 
-        # raw_score 0.25 < _MIN_RELEVANCE_THRESHOLD (0.3); boosting by 1.2
+        # raw_score 0.25 < memory_search_floor (0.3); boosting by 1.2
         # yields 0.30, but weighting happens AFTER the filter (§5.3) so this
         # row never reaches the walk. Result must be empty.
         mock_mem = MagicMock()
@@ -470,6 +478,44 @@ class TestFormatContext:
 
         result = await format_context("anything", user_id="123")
         assert result == ""
+
+    async def test_format_context_floor_from_config(self):
+        """The relevance floor is read from `config.memory_search_floor`,
+        not from a module-level constant. Spec 310 §7.5 requires the same
+        knob to govern both this path and the `/memory search` UI; this
+        test pins the read so a future refactor cannot reintroduce a
+        hard-coded constant without breaking it.
+
+        A row scoring 0.4 passes when the floor is 0.3 (default behavior)
+        but is filtered out when the floor is raised to 0.5 - verifying
+        the value is sourced from config at call time."""
+        import kai.memory as mem_mod
+        from kai.memory import format_context
+
+        # Single result whose score sits between the two test floors.
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = {
+            "results": [
+                {
+                    "id": "mid",
+                    "memory": "Mid-confidence fact",
+                    "score": 0.4,
+                    "metadata": {"type": "fact", "source": "extracted"},
+                    "created_at": "2026-04-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        # Floor at default 0.3: row passes.
+        mem_mod._config = _make_config(memory_search_floor=0.3)
+        out_low = await format_context("anything", user_id="123")
+        assert "Mid-confidence fact" in out_low
+
+        # Floor raised to 0.5: same row now filtered.
+        mem_mod._config = _make_config(memory_search_floor=0.5)
+        out_high = await format_context("anything", user_id="123")
+        assert out_high == ""
 
 
 class TestAddUserUtterance:
@@ -1156,6 +1202,742 @@ class TestGetStats:
         stats = get_stats(user_id="123")
         assert stats.total_count == 0
         assert stats.by_type == {}
+
+
+# ── Spec 310 §7.2: get_all limit + new helpers + extended stats ─────
+
+
+class TestGetAllLimit:
+    """The new `limit` parameter on `get_all`. Default behavior is
+    preserved for legacy callers (top_k=1000); /memory paths pass
+    `limit=None` to bypass the cap so users with >1000 facts see a
+    true total instead of a silent flatten."""
+
+    def test_default_limit_is_1000(self):
+        """No-arg call still requests top_k=1000 so existing callers
+        (delete_by_source pagination, ad-hoc admin) keep their bounded
+        memory footprint."""
+        import kai.memory as mem_mod
+        from kai.memory import get_all
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {"results": []}
+        mem_mod._memory = mock_mem
+
+        get_all(user_id="123")
+        mock_mem.get_all.assert_called_once()
+        kwargs = mock_mem.get_all.call_args.kwargs
+        assert kwargs["top_k"] == 1000
+
+    def test_explicit_limit_passed_through(self):
+        import kai.memory as mem_mod
+        from kai.memory import get_all
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {"results": []}
+        mem_mod._memory = mock_mem
+
+        get_all(user_id="123", limit=42)
+        assert mock_mem.get_all.call_args.kwargs["top_k"] == 42
+
+    def test_none_limit_uses_high_ceiling(self):
+        """`limit=None` requests a top_k far above any realistic
+        per-user count. Spec 310 §7.2.1 names 100000."""
+        import kai.memory as mem_mod
+        from kai.memory import get_all
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {"results": []}
+        mem_mod._memory = mock_mem
+
+        get_all(user_id="123", limit=None)
+        # The exact ceiling is an internal choice; require only that it
+        # is "well above realistic per-user counts" which the spec
+        # quantifies as 100000.
+        assert mock_mem.get_all.call_args.kwargs["top_k"] >= 100_000
+
+
+class TestGetByTag:
+    """Spec 310 §7.2 helper: extracted-only tag drill-down."""
+
+    def test_disabled_returns_empty(self):
+        from kai.memory import get_by_tag
+
+        assert get_by_tag(user_id="123", tag="preference") == []
+
+    def test_filters_by_tag_and_source(self):
+        """Only rows that are BOTH source==extracted AND have the tag
+        are returned. user_raw rows that happen to carry a tag
+        (defensive against future writers) are excluded."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_tag
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                # Match: extracted + tag.
+                {
+                    "id": "1",
+                    "memory": "Prefers Celsius",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference"],
+                    },
+                    "created_at": "2026-04-01T00:00:00",
+                    "updated_at": "2026-04-01T00:00:00",
+                },
+                # Excluded: extracted but different tag.
+                {
+                    "id": "2",
+                    "memory": "Lives in Boston",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["location"],
+                    },
+                    "created_at": "2026-04-02T00:00:00",
+                    "updated_at": "2026-04-02T00:00:00",
+                },
+                # Excluded: user_raw source even with a matching tag.
+                # Defends against future writers; the UI is documented
+                # as extracted-only.
+                {
+                    "id": "3",
+                    "memory": "Likes vim",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "exchange",
+                        "source": "user_raw",
+                        "tags": ["preference"],
+                    },
+                    "created_at": "2026-04-03T00:00:00",
+                    "updated_at": "2026-04-03T00:00:00",
+                },
+                # Excluded: legacy row missing source.
+                {
+                    "id": "4",
+                    "memory": "Old entry",
+                    "score": 0.0,
+                    "metadata": {"type": "exchange", "tags": ["preference"]},
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        results = get_by_tag(user_id="123", tag="preference")
+        assert [r.id for r in results] == ["1"]
+
+    def test_handles_multiple_tags_per_row(self):
+        """A fact tagged [preference, constraint] matches BOTH
+        get_by_tag('preference') AND get_by_tag('constraint'). The
+        spec's forget-by-tag warning ("tags are independent") is a
+        consequence of this overlap."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_tag
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                {
+                    "id": "1",
+                    "memory": "No em dashes",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference", "constraint"],
+                    },
+                    "created_at": "2026-04-01T00:00:00",
+                    "updated_at": "2026-04-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        assert len(get_by_tag(user_id="123", tag="preference")) == 1
+        assert len(get_by_tag(user_id="123", tag="constraint")) == 1
+
+    def test_sorted_by_updated_at_desc(self):
+        """Newest-updated row comes first - so a re-extracted fact
+        bubbles to the top of the tag list (spec §6.2)."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_tag
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                {
+                    "id": "old",
+                    "memory": "Older fact",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference"],
+                    },
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+                {
+                    "id": "new",
+                    "memory": "Newer fact",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference"],
+                    },
+                    "created_at": "2026-04-01T00:00:00",
+                    "updated_at": "2026-04-15T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        results = get_by_tag(user_id="123", tag="preference")
+        assert [r.id for r in results] == ["new", "old"]
+
+    def test_handles_missing_tags_metadata(self):
+        """A row without a tags list (defensive) simply does not
+        match any tag. Should not raise."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_tag
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {
+            "results": [
+                {
+                    "id": "no-tags",
+                    "memory": "Some fact",
+                    "score": 0.0,
+                    "metadata": {"type": "fact", "source": "extracted"},
+                    "created_at": "2026-04-01T00:00:00",
+                    "updated_at": "2026-04-01T00:00:00",
+                },
+            ]
+        }
+        mem_mod._memory = mock_mem
+
+        assert get_by_tag(user_id="123", tag="preference") == []
+
+    def test_passes_limit_none_to_get_all(self):
+        """get_by_tag must call get_all with limit=None so the tag
+        listing is not silently truncated for users with >1000 facts."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_tag
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {"results": []}
+        mem_mod._memory = mock_mem
+
+        get_by_tag(user_id="123", tag="preference")
+        # top_k must be the high ceiling, not the legacy 1000.
+        assert mock_mem.get_all.call_args.kwargs["top_k"] >= 100_000
+
+
+class TestGetById:
+    """Spec 310 §7.2 helper: ownership + source-scoped single fetch.
+
+    `get_by_id` is the single source of truth for "is this fact
+    addressable by /memory under this user?" - delete_by_id calls
+    it, and the fact-view / forget-fact-confirm screens call it
+    directly. The four not-found cases (missing, wrong user,
+    non-extracted, fetch error) all collapse to None; the UI treats
+    them identically."""
+
+    def test_disabled_returns_none(self):
+        from kai.memory import get_by_id
+
+        assert get_by_id(user_id="123", memory_id="abc") is None
+
+    def test_returns_none_when_row_missing(self):
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = None
+        mem_mod._memory = mock_mem
+
+        assert get_by_id(user_id="123", memory_id="missing") is None
+
+    def test_returns_none_on_user_mismatch(self):
+        """A memory_id that resolves to another user's row must not
+        leak through this fetch. Same blast radius rationale as
+        delete_by_id: cross-user data exposure on a multi-user install."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "memory": "secret",
+            "user_id": "other-user",
+            "metadata": {"source": "extracted"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert get_by_id(user_id="123", memory_id="abc") is None
+
+    def test_returns_none_on_non_extracted_source(self):
+        """Track 1 / legacy rows are intentionally invisible to
+        /memory UI surfaces - they belong to memory_admin.py."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "memory": "raw exchange",
+            "user_id": "123",
+            "metadata": {"source": "user_raw"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert get_by_id(user_id="123", memory_id="abc") is None
+
+    def test_returns_none_on_legacy_missing_source(self):
+        """Legacy rows with no source key are also invisible."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "memory": "old",
+            "user_id": "123",
+            "metadata": {"type": "exchange"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert get_by_id(user_id="123", memory_id="abc") is None
+
+    def test_returns_none_on_fetch_exception(self):
+        """An unexpected Mem0 failure during get must not raise to
+        the caller - the UI cannot do anything useful with a stack
+        trace, and "no such fact" is a survivable degradation."""
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.side_effect = RuntimeError("vector store down")
+        mem_mod._memory = mock_mem
+
+        assert get_by_id(user_id="123", memory_id="abc") is None
+
+    def test_happy_path_wraps_result(self):
+        import kai.memory as mem_mod
+        from kai.memory import get_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "memory": "user prefers tea",
+            "user_id": "123",
+            "metadata": {"source": "extracted", "type": "preference"},
+            "created_at": "2026-04-17T10:00:00Z",
+            "updated_at": "2026-04-17T11:00:00Z",
+        }
+        mem_mod._memory = mock_mem
+
+        result = get_by_id(user_id="123", memory_id="abc")
+        assert result is not None
+        assert result.id == "abc"
+        assert result.text == "user prefers tea"
+        assert result.memory_type == "preference"
+        assert result.metadata.get("source") == "extracted"
+        assert result.created_at == "2026-04-17T10:00:00Z"
+        assert result.updated_at == "2026-04-17T11:00:00Z"
+
+
+class TestDeleteById:
+    """Spec 310 §7.2 helper: ownership + source-checked single delete.
+
+    Now delegates ownership/source verification to get_by_id, so the
+    test suite below covers the delete-specific behavior (the actual
+    delete call, ValueError swallowing). The verify rules themselves
+    are exercised in TestGetById."""
+
+    def test_disabled_returns_false(self):
+        from kai.memory import delete_by_id
+
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+
+    def test_returns_false_when_row_missing(self):
+        """Mem0's get returns None for an unknown id; delete_by_id
+        must propagate that as False without calling delete."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = None
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="missing") is False
+        mock_mem.delete.assert_not_called()
+
+    def test_returns_false_on_user_mismatch(self):
+        """A memory_id that resolves to a different user's row must
+        not be deleted - cross-user data deletion is the worst-case
+        consequence of malformed callback data on a multi-user install."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "user_id": "other-user",
+            "metadata": {"source": "extracted"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+        mock_mem.delete.assert_not_called()
+
+    def test_returns_false_on_non_extracted_source(self):
+        """The /memory UI is documented to manage extracted memories
+        only. Track 1 (user_raw) and legacy rows are owned by the
+        admin CLI; refuse to delete them through this path."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "user_id": "123",
+            "metadata": {"source": "user_raw"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+        mock_mem.delete.assert_not_called()
+
+    def test_returns_false_on_legacy_missing_source(self):
+        """A legacy row whose metadata lacks a source key entirely
+        must NOT be deletable through /memory. Same rationale as
+        non-extracted: legacy is admin-CLI territory."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "user_id": "123",
+            "metadata": {"type": "exchange"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+        mock_mem.delete.assert_not_called()
+
+    def test_happy_path_deletes_and_returns_true(self):
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "user_id": "123",
+            "metadata": {"source": "extracted"},
+        }
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="abc") is True
+        mock_mem.delete.assert_called_once_with(memory_id="abc")
+
+    def test_value_error_swallowed_as_false(self):
+        """Mem0 raises ValueError when the row vanishes between get and
+        delete. Treated as "nothing to do" (False) rather than an error
+        - the user ends up where they wanted (row gone) and the UI is
+        not blocked rendering a confusing failure."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {
+            "id": "abc",
+            "user_id": "123",
+            "metadata": {"source": "extracted"},
+        }
+        mock_mem.delete.side_effect = ValueError("Memory with id abc not found")
+        mem_mod._memory = mock_mem
+
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+
+    def test_handles_missing_metadata_dict(self):
+        """Mem0 omits the metadata key entirely when the row has no
+        extra payload (verified at mem0/memory/main.py). delete_by_id
+        must not raise KeyError on that shape."""
+        import kai.memory as mem_mod
+        from kai.memory import delete_by_id
+
+        mock_mem = MagicMock()
+        mock_mem.get.return_value = {"id": "abc", "user_id": "123"}
+        mem_mod._memory = mock_mem
+
+        # No metadata -> source check fails, refuse to delete.
+        assert delete_by_id(user_id="123", memory_id="abc") is False
+        mock_mem.delete.assert_not_called()
+
+
+class TestGetStatsExtended:
+    """Spec 310 §6.6 / §7.2: extended MemoryStats fields.
+
+    The legacy `total_count` / `by_type` fields are tested separately
+    in TestGetStats; this class focuses on the new extracted-only
+    aggregates."""
+
+    def _stats_with(self, rows):
+        """Helper: install a mock returning `rows` and call get_stats."""
+        import kai.memory as mem_mod
+        from kai.memory import get_stats
+
+        mock_mem = MagicMock()
+        mock_mem.get_all.return_value = {"results": rows}
+        mem_mod._memory = mock_mem
+        return get_stats(user_id="123")
+
+    def test_extracted_count_excludes_other_sources(self):
+        """extracted_count counts only source==extracted rows; total_count
+        still counts everything for backward compat."""
+        stats = self._stats_with(
+            [
+                {
+                    "id": "1",
+                    "memory": "f",
+                    "score": 0.0,
+                    "metadata": {"type": "fact", "source": "extracted", "confidence": 0.9},
+                    "created_at": "",
+                },
+                {
+                    "id": "2",
+                    "memory": "u",
+                    "score": 0.0,
+                    "metadata": {"type": "exchange", "source": "user_raw"},
+                    "created_at": "",
+                },
+                {
+                    "id": "3",
+                    "memory": "l",
+                    "score": 0.0,
+                    "metadata": {"type": "exchange"},
+                    "created_at": "",
+                },
+            ]
+        )
+        assert stats.total_count == 3
+        assert stats.extracted_count == 1
+
+    def test_by_tag_aggregates_extracted_only(self):
+        """A user_raw row carrying a tag does not contribute to by_tag,
+        even if a future writer starts emitting tags on Track 1 rows."""
+        stats = self._stats_with(
+            [
+                {
+                    "id": "1",
+                    "memory": "a",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference", "constraint"],
+                        "confidence": 0.9,
+                    },
+                    "created_at": "",
+                },
+                {
+                    "id": "2",
+                    "memory": "b",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "fact",
+                        "source": "extracted",
+                        "tags": ["preference"],
+                        "confidence": 0.8,
+                    },
+                    "created_at": "",
+                },
+                {
+                    "id": "3",
+                    "memory": "c",
+                    "score": 0.0,
+                    "metadata": {
+                        "type": "exchange",
+                        "source": "user_raw",
+                        "tags": ["preference"],
+                    },
+                    "created_at": "",
+                },
+            ]
+        )
+        assert stats.by_tag == {"preference": 2, "constraint": 1}
+
+    def test_confidence_min_median_max_odd_count(self):
+        """Three values [0.6, 0.8, 0.9]: min=0.6, median=0.8, max=0.9."""
+        stats = self._stats_with(
+            [
+                {
+                    "id": str(i),
+                    "memory": "x",
+                    "score": 0.0,
+                    "metadata": {"source": "extracted", "tags": ["fact"], "confidence": c},
+                    "created_at": "",
+                }
+                for i, c in enumerate([0.9, 0.6, 0.8])
+            ]
+        )
+        assert stats.confidence_min == 0.6
+        assert stats.confidence_median == 0.8
+        assert stats.confidence_max == 0.9
+
+    def test_confidence_median_even_count_picks_lower(self):
+        """Spec §6.6: median with even count picks the LOWER of the two
+        middle values (statistics.median_low semantics) rather than
+        averaging them - averaging would synthesize a value no fact
+        actually had."""
+        # Four values [0.5, 0.7, 0.8, 1.0]; mean of middle two would
+        # be 0.75, but median_low picks 0.7.
+        stats = self._stats_with(
+            [
+                {
+                    "id": str(i),
+                    "memory": "x",
+                    "score": 0.0,
+                    "metadata": {"source": "extracted", "tags": ["fact"], "confidence": c},
+                    "created_at": "",
+                }
+                for i, c in enumerate([1.0, 0.5, 0.8, 0.7])
+            ]
+        )
+        assert stats.confidence_median == 0.7
+
+    def test_confidence_below_thresholds(self):
+        """Counts at the 0.7 and 0.6 cutoffs. Strictly less-than per spec
+        (the boundary value itself does not count toward "below")."""
+        stats = self._stats_with(
+            [
+                {
+                    "id": str(i),
+                    "memory": "x",
+                    "score": 0.0,
+                    "metadata": {"source": "extracted", "tags": ["fact"], "confidence": c},
+                    "created_at": "",
+                }
+                # 0.55 below both; 0.65 below 0.7 only; 0.7 below neither;
+                # 0.85 below neither.
+                for i, c in enumerate([0.55, 0.65, 0.7, 0.85])
+            ]
+        )
+        assert stats.confidence_below_0_7 == 2
+        assert stats.confidence_below_0_6 == 1
+
+    def test_confirmation_quote_count(self):
+        stats = self._stats_with(
+            [
+                {
+                    "id": "1",
+                    "memory": "x",
+                    "score": 0.0,
+                    "metadata": {
+                        "source": "extracted",
+                        "tags": ["confirmed_action"],
+                        "confidence": 0.9,
+                        "confirmation_quote": "yes please go ahead and do that",
+                    },
+                    "created_at": "",
+                },
+                {
+                    "id": "2",
+                    "memory": "y",
+                    "score": 0.0,
+                    "metadata": {"source": "extracted", "tags": ["fact"], "confidence": 0.9},
+                    "created_at": "",
+                },
+            ]
+        )
+        assert stats.confirmation_quote_count == 1
+
+    def test_by_prompt_version_counts(self):
+        stats = self._stats_with(
+            [
+                {
+                    "id": "1",
+                    "memory": "x",
+                    "score": 0.0,
+                    "metadata": {
+                        "source": "extracted",
+                        "tags": ["fact"],
+                        "confidence": 0.9,
+                        "prompt_version": "v3",
+                    },
+                    "created_at": "",
+                },
+                {
+                    "id": "2",
+                    "memory": "y",
+                    "score": 0.0,
+                    "metadata": {
+                        "source": "extracted",
+                        "tags": ["fact"],
+                        "confidence": 0.9,
+                        "prompt_version": "v3",
+                    },
+                    "created_at": "",
+                },
+                {
+                    "id": "3",
+                    "memory": "z",
+                    "score": 0.0,
+                    "metadata": {
+                        "source": "extracted",
+                        "tags": ["fact"],
+                        "confidence": 0.9,
+                        "prompt_version": "v2",
+                    },
+                    "created_at": "",
+                },
+            ]
+        )
+        assert stats.by_prompt_version == {"v3": 2, "v2": 1}
+
+    def test_empty_extracted_set_yields_none_confidence(self):
+        """No extracted rows -> min/median/max are None (NOT 0.0) so
+        the UI can render "n/a" rather than a misleading score."""
+        stats = self._stats_with(
+            [
+                {
+                    "id": "1",
+                    "memory": "u",
+                    "score": 0.0,
+                    "metadata": {"type": "exchange", "source": "user_raw"},
+                    "created_at": "",
+                },
+            ]
+        )
+        assert stats.extracted_count == 0
+        assert stats.confidence_min is None
+        assert stats.confidence_median is None
+        assert stats.confidence_max is None
+        assert stats.confidence_below_0_7 == 0
+        assert stats.confidence_below_0_6 == 0
+        assert stats.confirmation_quote_count == 0
+        assert stats.by_tag == {}
+        assert stats.by_prompt_version == {}
+
+    def test_disabled_returns_zeroed_extended_fields(self):
+        """When memory is disabled the new fields collapse to their
+        sentinel defaults, just like total_count and by_type."""
+        from kai.memory import get_stats
+
+        stats = get_stats(user_id="123")
+        assert stats.extracted_count == 0
+        assert stats.confidence_min is None
+        assert stats.by_tag == {}
+        assert stats.by_prompt_version == {}
 
 
 # ── Integration tests (real Mem0 + Qdrant, slower) ──────────────────

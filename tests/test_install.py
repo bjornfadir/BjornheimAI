@@ -27,6 +27,7 @@ from kai.install import (
     _cmd_apply,
     _cmd_config,
     _cmd_status,
+    _collect_os_users_from_yaml,
     _copy_tree,
     _file_checksum,
     _generate_env_file,
@@ -357,6 +358,238 @@ class TestGenerateSudoers:
         monkeypatch.setattr(shutil, "which", lambda n: None if n == "claude" else real_which(n))
         result = _generate_sudoers("kai", claude_user="alice")
         assert "kai ALL=(alice) SETENV: NOPASSWD: /home/kai/.local/bin/claude" in result
+
+    # -- Issue #341: per-user rules from users.yaml -----------------------
+
+    def test_no_per_user_rule_when_os_users_empty(self, monkeypatch):
+        """Acceptance (a): zero os_user entries → no per-user rules emitted."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        result = _generate_sudoers("kai", os_users=[])
+        assert "SETENV: NOPASSWD" not in result
+        assert "claude" not in result
+
+    def test_one_os_user_emits_one_rule(self, monkeypatch):
+        """Acceptance (b): one os_user → one matching rule."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude" if n == "claude" else real_which(n))
+        result = _generate_sudoers("kai", os_users=["sellison"])
+        assert result.count("SETENV: NOPASSWD: /usr/bin/claude") == 1
+        assert "kai ALL=(sellison) SETENV: NOPASSWD: /usr/bin/claude" in result
+
+    def test_multiple_os_users_emit_one_rule_each(self, monkeypatch):
+        """Acceptance (c): multiple distinct os_users → one rule each."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude" if n == "claude" else real_which(n))
+        result = _generate_sudoers("kai", os_users=["sellison", "bob", "carol"])
+        assert "kai ALL=(sellison) SETENV: NOPASSWD: /usr/bin/claude" in result
+        assert "kai ALL=(bob) SETENV: NOPASSWD: /usr/bin/claude" in result
+        assert "kai ALL=(carol) SETENV: NOPASSWD: /usr/bin/claude" in result
+        assert result.count("SETENV: NOPASSWD: /usr/bin/claude") == 3
+
+    def test_duplicate_os_users_deduped(self, monkeypatch):
+        """Acceptance (c, dedupe): repeated os_user values produce one rule."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude" if n == "claude" else real_which(n))
+        result = _generate_sudoers("kai", os_users=["sellison", "sellison", "bob"])
+        assert result.count("(sellison)") == 1
+        assert result.count("(bob)") == 1
+
+    def test_os_user_matching_service_user_skipped(self, monkeypatch):
+        """Acceptance (d): os_user == service_user → no rule (self-sudo path)."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude" if n == "claude" else real_which(n))
+        result = _generate_sudoers("kai", os_users=["kai", "sellison"])
+        # No self-sudo rule: kai ALL=(kai) would be a dead rule, since
+        # resolve_claude_user() short-circuits the sudo wrapper at runtime.
+        assert "kai ALL=(kai)" not in result
+        assert "kai ALL=(sellison) SETENV: NOPASSWD: /usr/bin/claude" in result
+        assert result.count("SETENV: NOPASSWD: /usr/bin/claude") == 1
+
+    def test_legacy_claude_user_combined_with_os_users(self, monkeypatch):
+        """Legacy CLAUDE_USER and yaml os_users coexist; deduped."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude" if n == "claude" else real_which(n))
+        # claude_user and os_users overlap on "alice"; should produce one rule.
+        result = _generate_sudoers("kai", claude_user="alice", os_users=["alice", "bob"])
+        assert result.count("(alice)") == 1
+        assert result.count("(bob)") == 1
+
+
+class TestCollectOsUsersFromYaml:
+    """Loader for issue #341 — extract distinct os_user values from users.yaml."""
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        """First-install path: users.yaml does not exist yet."""
+        result = _collect_os_users_from_yaml(tmp_path / "nope.yaml")
+        assert result == []
+
+    def test_empty_file_returns_empty(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text("", encoding="utf-8")
+        assert _collect_os_users_from_yaml(path) == []
+
+    def test_whitespace_only_returns_empty(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text("   \n\t\n", encoding="utf-8")
+        assert _collect_os_users_from_yaml(path) == []
+
+    def test_no_users_key_returns_empty(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text("other_key: 1\n", encoding="utf-8")
+        assert _collect_os_users_from_yaml(path) == []
+
+    def test_users_not_list_returns_empty(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text("users: not_a_list\n", encoding="utf-8")
+        assert _collect_os_users_from_yaml(path) == []
+
+    def test_no_os_user_field_returns_empty(self, tmp_path):
+        """Users without os_user (the default — bot's service user) are skipped."""
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump({"users": [{"telegram_id": 1, "name": "alice"}]}),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == []
+
+    def test_one_os_user_returned(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump({"users": [{"telegram_id": 1, "os_user": "sellison"}]}),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison"]
+
+    def test_multiple_distinct_os_users_returned(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "users": [
+                        {"telegram_id": 1, "os_user": "sellison"},
+                        {"telegram_id": 2, "os_user": "bob"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison", "bob"]
+
+    def test_duplicates_deduped_preserving_first_seen_order(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "users": [
+                        {"telegram_id": 1, "os_user": "sellison"},
+                        {"telegram_id": 2, "os_user": "bob"},
+                        {"telegram_id": 3, "os_user": "sellison"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison", "bob"]
+
+    def test_empty_string_os_user_skipped(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "users": [
+                        {"telegram_id": 1, "os_user": ""},
+                        {"telegram_id": 2, "os_user": "  "},
+                        {"telegram_id": 3, "os_user": "sellison"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison"]
+
+    def test_non_string_os_user_skipped(self, tmp_path):
+        """PyYAML may parse "yes"/"no"/numbers as bool/int; filter those out."""
+        path = tmp_path / "users.yaml"
+        # Hand-craft YAML to force bool/int values for os_user.
+        path.write_text(
+            "users:\n"
+            "  - telegram_id: 1\n"
+            "    os_user: true\n"
+            "  - telegram_id: 2\n"
+            "    os_user: 42\n"
+            "  - telegram_id: 3\n"
+            "    os_user: sellison\n",
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison"]
+
+    def test_os_user_is_stripped(self, tmp_path):
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump({"users": [{"telegram_id": 1, "os_user": "  sellison  "}]}),
+            encoding="utf-8",
+        )
+        assert _collect_os_users_from_yaml(path) == ["sellison"]
+
+    def test_malformed_yaml_raises(self, tmp_path):
+        """Corrupt YAML must surface so install fails loudly, not silently."""
+        path = tmp_path / "users.yaml"
+        path.write_text("users:\n  - [unclosed\n", encoding="utf-8")
+        with pytest.raises(yaml.YAMLError):
+            _collect_os_users_from_yaml(path)
+
+    # -- Security: validate os_user before sudoers write (PR #342 review) -
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "alice) NOPASSWD: ALL",  # closing-paren injection
+            "alice\nroot ALL=(ALL) NOPASSWD: ALL",  # newline injection
+            "alice ALL",  # whitespace
+            "alice;bob",  # semicolon
+            "alice=bob",  # equals
+            "alice/bob",  # slash
+            "alice@host",  # at-sign
+        ],
+    )
+    def test_invalid_os_user_raises(self, tmp_path, bad_value):
+        """Crafted os_user values that could inject sudoers directives must raise."""
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump({"users": [{"telegram_id": 1, "os_user": bad_value}]}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Invalid os_user"):
+            _collect_os_users_from_yaml(path)
+
+    def test_invalid_os_user_error_names_path(self, tmp_path):
+        """ValueError message includes the offending path so the operator can fix it."""
+        path = tmp_path / "users.yaml"
+        path.write_text(
+            yaml.safe_dump({"users": [{"telegram_id": 1, "os_user": "bad)user"}]}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=str(path)):
+            _collect_os_users_from_yaml(path)
+
+
+class TestGenerateSudoersValidation:
+    """Defense-in-depth: _generate_sudoers itself must reject bad targets."""
+
+    def test_invalid_os_user_in_os_users_raises(self):
+        """Bad os_users values must raise even if they bypass the loader."""
+        with pytest.raises(ValueError, match="Invalid sudoers target user"):
+            _generate_sudoers("kai", os_users=["alice) NOPASSWD: ALL"])
+
+    def test_invalid_claude_user_raises(self):
+        """Legacy CLAUDE_USER env var path must also be validated."""
+        with pytest.raises(ValueError, match="Invalid sudoers target user"):
+            _generate_sudoers("kai", claude_user="alice\nroot ALL")
 
 
 class TestGenerateLaunchdPlist:

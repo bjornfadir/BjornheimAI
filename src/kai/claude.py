@@ -33,6 +33,7 @@ from kai.backend import (
     StreamEvent,
     build_foreign_workspace_reminder,
     build_session_context,
+    ensure_user_memory,
     prepend_to_prompt,
 )
 from kai.config import DATA_DIR, WorkspaceConfig, parse_env_file, resolve_claude_user
@@ -398,6 +399,26 @@ class ClaudeCodeBackend(AgentBackend):
         # in backend.py as shared functions usable by any backend.
         if self._fresh_session:
             self._fresh_session = False
+            # Ensure this user's MEMORY.md exists before the session
+            # context is built. In production, install.py pre-creates
+            # the per-user directory; this call is a no-op then. For
+            # users added after install (or local dev with no install
+            # at all), it seeds the directory + file so the subprocess
+            # has a writable target and build_session_context reads a
+            # real file rather than falling back to the "not yet
+            # created" placeholder. See backend.ensure_user_memory().
+            #
+            # Retry limitation: this call is gated on _fresh_session,
+            # which the line above flips to False unconditionally. A
+            # transient OSError inside ensure_user_memory (logged as a
+            # warning, not raised) is therefore not retried on
+            # subsequent messages of the same session - the session
+            # would have to be rebuilt for another attempt. In
+            # practice the failure modes are persistent (permissions,
+            # missing parent dir), not transient, so this is
+            # acceptable; documenting it so future readers do not
+            # assume self-healing.
+            ensure_user_memory(chat_id, DATA_DIR)
             session_ctx = build_session_context(
                 workspace=self.workspace,
                 home_workspace=self.home_workspace,

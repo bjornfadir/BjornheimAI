@@ -692,6 +692,7 @@ class TestCmdConfig:
                 "false",  # voice
                 "false",  # tts
                 "",  # claude user (empty)
+                "false",  # memory enabled
                 "",  # perplexity key (empty)
             ]
         )
@@ -756,6 +757,7 @@ class TestCmdConfig:
                 "false",  # voice
                 "false",  # tts
                 # no claude user prompt (skipped by advanced mode)
+                "false",  # memory enabled
                 "",  # perplexity key (empty)
             ]
         )
@@ -819,6 +821,7 @@ class TestCmdConfig:
                 "false",  # voice
                 "false",  # tts
                 "",  # claude user (empty)
+                "false",  # memory enabled
                 "",  # perplexity key (empty)
             ]
         )
@@ -873,6 +876,7 @@ class TestCmdConfig:
                 "false",  # voice
                 "false",  # tts
                 "",  # claude user (empty)
+                "false",  # memory enabled
                 "",  # perplexity key (empty)
             ]
         )
@@ -939,6 +943,239 @@ class TestCmdConfig:
         assert _validate_chat_id("12345") is True
         assert _validate_chat_id("0") is False
         assert _validate_chat_id("abc") is False
+
+    # ── Memory env var prompts (#343) ─────────────────────────────────
+
+    @staticmethod
+    def _base_inputs(memory_block: list[str]) -> list[str]:
+        """Default wizard inputs with a swappable memory block."""
+        return [
+            "/opt/kai",  # install dir
+            "/var/lib/kai",  # data dir
+            "kai",  # service user
+            "darwin",  # platform
+            "fake-token",  # bot token
+            "12345",  # admin telegram ID
+            "admin",  # admin display name
+            "false",  # advanced user options
+            "polling",  # transport
+            "claude",  # agent backend
+            "sonnet",  # model
+            "120",  # timeout
+            "10.0",  # budget
+            "200000",  # max context window
+            "80",  # autocompact pct
+            "8080",  # port
+            "test-secret",  # webhook secret
+            "~/Projects",  # workspace base
+            "",  # allowed workspaces
+            "false",  # pr review enabled
+            "900",  # pr review timeout
+            "1.0",  # pr review budget
+            "false",  # issue triage
+            "",  # github notify chat id
+            "false",  # voice
+            "false",  # tts
+            "",  # claude user
+            *memory_block,
+            "",  # perplexity key
+        ]
+
+    def test_memory_disabled_omits_env_keys(self, tmp_path, monkeypatch):
+        """MEMORY_ENABLED=false produces no MEMORY_* env entries."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        inputs = iter(self._base_inputs(["false"]))  # memory disabled
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        conf = json.loads((tmp_path / "install.conf").read_text())
+        for key in conf["env"]:
+            assert not key.startswith("MEMORY_"), f"unexpected memory key: {key}"
+
+    def test_memory_enabled_writes_tunables(self, tmp_path, monkeypatch):
+        """MEMORY_ENABLED=true with extraction writes the chosen tunables."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # Memory on, extraction on, custom budget + token budget.
+        memory_block = [
+            "true",  # memory enabled
+            "true",  # extraction enabled (claude backend)
+            "0.05",  # extraction budget USD
+            "3000",  # token budget
+        ]
+        inputs = iter(self._base_inputs(memory_block))
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        conf = json.loads((tmp_path / "install.conf").read_text())
+        env = conf["env"]
+        assert env["MEMORY_ENABLED"] == "true"
+        assert env["MEMORY_EXTRACTION_ENABLED"] == "true"
+        assert env["MEMORY_EXTRACTION_BUDGET_USD"] == "0.05"
+        assert env["MEMORY_TOKEN_BUDGET"] == "3000"
+
+    def test_memory_round_trip_through_env_file(self, tmp_path, monkeypatch):
+        """Wizard-captured memory vars survive _generate_env_file()."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        memory_block = ["true", "true", "0.07", "2500"]
+        inputs = iter(self._base_inputs(memory_block))
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        conf = json.loads((tmp_path / "install.conf").read_text())
+        rendered = _generate_env_file(conf["env"])
+        assert 'MEMORY_ENABLED="true"' in rendered
+        assert 'MEMORY_EXTRACTION_ENABLED="true"' in rendered
+        assert 'MEMORY_EXTRACTION_BUDGET_USD="0.07"' in rendered
+        assert 'MEMORY_TOKEN_BUDGET="2500"' in rendered
+
+    def test_memory_defaults_from_existing_install_conf(self, tmp_path, monkeypatch):
+        """Re-running the wizard offers prior memory choices as defaults."""
+        monkeypatch.chdir(tmp_path)
+        conf_path = tmp_path / "install.conf"
+        monkeypatch.setattr("kai.install.INSTALL_CONF", conf_path)
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # AGENT_BACKEND seeded explicitly so the extraction-keys cleanup (non-claude pops them) doesn't depend on the wizard's implicit default.
+        existing = {
+            "version": 1,
+            "install_dir": "/opt/kai",
+            "data_dir": "/var/lib/kai",
+            "service_user": "kai",
+            "platform": "darwin",
+            "env": {
+                "TELEGRAM_BOT_TOKEN": "existing-token",
+                "WEBHOOK_SECRET": "existing-secret",
+                "AGENT_BACKEND": "claude",
+                "MEMORY_ENABLED": "true",
+                "MEMORY_EXTRACTION_ENABLED": "true",
+                "MEMORY_EXTRACTION_BUDGET_USD": "0.08",
+                "MEMORY_TOKEN_BUDGET": "4000",
+            },
+        }
+        conf_path.write_text(json.dumps(existing))
+        # users.yaml prevents per-user prompts that lack defaults.
+        (tmp_path / "users.yaml").write_text("users:\n  - telegram_id: 999\n    name: existing\n    role: admin\n")
+
+        monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+        _cmd_config()
+
+        conf = json.loads(conf_path.read_text())
+        env = conf["env"]
+        assert env["MEMORY_ENABLED"] == "true"
+        assert env["MEMORY_EXTRACTION_ENABLED"] == "true"
+        assert env["MEMORY_EXTRACTION_BUDGET_USD"] == "0.08"
+        assert env["MEMORY_TOKEN_BUDGET"] == "4000"
+
+    def test_memory_toggle_off_drops_existing_keys(self, tmp_path, monkeypatch):
+        """Switching MEMORY_ENABLED true -> false strips stale MEMORY_* keys."""
+        monkeypatch.chdir(tmp_path)
+        conf_path = tmp_path / "install.conf"
+        monkeypatch.setattr("kai.install.INSTALL_CONF", conf_path)
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # Disabling memory must strip stale keys; otherwise the daemon keeps memory live after the operator opts out.
+        existing = {
+            "version": 1,
+            "env": {
+                "MEMORY_ENABLED": "true",
+                "MEMORY_EXTRACTION_ENABLED": "true",
+                "MEMORY_EXTRACTION_BUDGET_USD": "0.05",
+                "MEMORY_TOKEN_BUDGET": "3000",
+            },
+        }
+        conf_path.write_text(json.dumps(existing))
+
+        inputs = iter(self._base_inputs(["false"]))  # memory toggled off
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        env = json.loads(conf_path.read_text())["env"]
+        for key in env:
+            assert not key.startswith("MEMORY_"), f"stale memory key: {key}"
+
+    def test_non_claude_backend_drops_stale_extraction_keys(self, tmp_path, monkeypatch):
+        """Switching from claude to goose strips MEMORY_EXTRACTION_* keys."""
+        monkeypatch.chdir(tmp_path)
+        conf_path = tmp_path / "install.conf"
+        monkeypatch.setattr("kai.install.INSTALL_CONF", conf_path)
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # Switching claude -> goose must drop extraction keys (bot.py:3609 silently ignores them on non-claude).
+        existing = {
+            "version": 1,
+            "env": {
+                "AGENT_BACKEND": "goose",
+                "MEMORY_ENABLED": "true",
+                "MEMORY_EXTRACTION_ENABLED": "true",
+                "MEMORY_EXTRACTION_BUDGET_USD": "0.05",
+            },
+        }
+        conf_path.write_text(json.dumps(existing))
+
+        inputs = iter(
+            [
+                "/opt/kai",  # install dir
+                "/var/lib/kai",  # data dir
+                "kai",  # service user
+                "darwin",  # platform
+                "fake-token",  # bot token
+                "12345",  # admin telegram ID
+                "admin",  # admin display name
+                "false",  # advanced user options
+                "polling",  # transport
+                "goose",  # agent backend (was claude)
+                "anthropic",  # goose provider
+                "sk-ant-test-key",  # API key
+                "sonnet",  # model
+                "120",  # timeout
+                "10.0",  # budget
+                "200000",  # max context window
+                "80",  # autocompact pct
+                "8080",  # port
+                "test-secret",  # webhook secret
+                "~/Projects",  # workspace base
+                "",  # allowed workspaces
+                "false",  # pr review enabled
+                "900",  # pr review timeout
+                "1.0",  # pr review budget
+                "false",  # issue triage
+                "",  # github notify chat id
+                "false",  # voice
+                "false",  # tts
+                "",  # claude user
+                "true",  # memory enabled (extraction prompt skipped: non-claude)
+                "2000",  # token budget
+                "",  # perplexity key
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        env = json.loads(conf_path.read_text())["env"]
+        assert env["MEMORY_ENABLED"] == "true"
+        assert "MEMORY_EXTRACTION_ENABLED" not in env
+        assert "MEMORY_EXTRACTION_BUDGET_USD" not in env
 
 
 # ── Apply subcommand ─────────────────────────────────────────────────

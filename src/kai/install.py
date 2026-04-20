@@ -696,6 +696,50 @@ def _cmd_config() -> None:
         )
     print()
 
+    # -- Semantic memory --
+    # MEMORY_ENABLED is a single global toggle for Mem0 + Qdrant. Per-user
+    # partitioning happens at runtime via user_id = telegram_chat_id, so
+    # there is no users.yaml branching here. Without these prompts the
+    # wizard silently drops memory config on every reinstall (see #343).
+    print("-- Semantic memory --")
+    memory_enabled = _prompt_bool(
+        "Enable semantic memory (Mem0 + Qdrant)",
+        existing_env.get("MEMORY_ENABLED", "false").lower() in ("1", "true", "yes"),
+    )
+    # Defaults match the dataclass values in config.py. Only non-defaults
+    # (or memory_enabled=true itself) are written to the env dict below.
+    memory_extraction_enabled = False
+    memory_extraction_budget_usd = "0.01"
+    memory_token_budget = "2000"
+    if memory_enabled:
+        # Haiku extraction only fires when the active backend is Claude
+        # (bot.py:3609 silently skips it otherwise - no startup error,
+        # no log line). Skip the prompt for non-claude backends rather
+        # than offer an option whose effect is invisible at runtime.
+        if agent_backend == "claude":
+            memory_extraction_enabled = _prompt_bool(
+                "Enable Haiku extraction (proactive memory writes)",
+                existing_env.get("MEMORY_EXTRACTION_ENABLED", "false").lower() in ("1", "true", "yes"),
+            )
+            if memory_extraction_enabled:
+                while True:
+                    memory_extraction_budget_usd = _prompt(
+                        "Per-extraction USD budget (suggest 0.05 or higher)",
+                        existing_env.get("MEMORY_EXTRACTION_BUDGET_USD", "0.01"),
+                    )
+                    if _validate_positive_float(memory_extraction_budget_usd):
+                        break
+                    print("  Must be a positive number.")
+        while True:
+            memory_token_budget = _prompt(
+                "Memory context token budget per turn",
+                existing_env.get("MEMORY_TOKEN_BUDGET", "2000"),
+            )
+            if _validate_positive_int(memory_token_budget):
+                break
+            print("  Must be a positive integer.")
+    print()
+
     # -- External services --
     print("-- External services --")
     perplexity_key = _prompt(
@@ -790,6 +834,29 @@ def _cmd_config() -> None:
         env["PR_REVIEW_TIMEOUT_S"] = pr_review_timeout_s
     if pr_review_budget_usd != "1.0":
         env["PR_REVIEW_BUDGET_USD"] = pr_review_budget_usd
+
+    # Semantic memory: global env vars (per-user partitioning is runtime).
+    # Toggling memory_enabled from true back to false correctly drops
+    # MEMORY_* keys here, so the next /etc/kai/env reflects the new state.
+    # Numeric comparisons (not string) so "0.010" or "2000.0" are not
+    # treated as non-default and spuriously written.
+    if memory_enabled:
+        env["MEMORY_ENABLED"] = "true"
+        if memory_extraction_enabled:
+            env["MEMORY_EXTRACTION_ENABLED"] = "true"
+            if float(memory_extraction_budget_usd) != 0.01:
+                env["MEMORY_EXTRACTION_BUDGET_USD"] = memory_extraction_budget_usd
+        if int(memory_token_budget) != 2000:
+            env["MEMORY_TOKEN_BUDGET"] = memory_token_budget
+
+    # Drop stale extraction keys when the backend isn't Claude. Mirrors
+    # the CLAUDE_MODEL/CLAUDE_MAX_BUDGET_USD cleanup above: bot.py:3609
+    # silently ignores these on non-claude backends, so leaving them in
+    # /etc/kai/env is misleading without effect. A user who flips backend
+    # from claude to goose should not see lingering extraction config.
+    if agent_backend != "claude":
+        env.pop("MEMORY_EXTRACTION_ENABLED", None)
+        env.pop("MEMORY_EXTRACTION_BUDGET_USD", None)
 
     # Build and write install.conf
     conf = {

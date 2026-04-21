@@ -15,13 +15,14 @@ prompt assembly that is identical across all backends.
 """
 
 import logging
+import os
 import shutil
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kai.config import PROJECT_ROOT, WorkspaceConfig
+from kai.config import DATA_DIR, PROJECT_ROOT, Config, WorkspaceConfig
 from kai.history import get_recent_history
 
 log = logging.getLogger(__name__)
@@ -435,6 +436,132 @@ def ensure_user_memory(chat_id: int | None, data_dir: Path) -> None:
             user_memory_file,
             exc_info=True,
         )
+
+
+def ensure_user_home(chat_id: int | None, data_dir: Path) -> Path:
+    """
+    Lazily create the per-user home workspace directory.
+
+    Returns the path that should be used as the user's home workspace
+    when users.yaml does not set an explicit home_workspace override.
+    Idempotent and cheap: a stat and a possible mkdir. Called on every
+    session init (and on `/workspace home`) so that any user without a
+    pre-created `home/<chat_id>/` - single-user dev, test runs, or a
+    user added to users.yaml after install - still lands in a valid
+    directory on their first message.
+
+    This is the companion to ensure_user_memory() above. Same scope
+    caveats apply (copied verbatim because the multi-user ownership
+    semantics are identical):
+
+    * Production multi-user (users.yaml entry has an explicit os_user
+      different from the service user): the install step (install.py
+      `_apply_migrate`) pre-creates and chowns `home/<chat_id>/` to the
+      user's os_user. mkdir here is then a no-op and the directory is
+      already writable by the subprocess identity.
+    * A user added to users.yaml AFTER install with a distinct os_user:
+      lazy bootstrap is NOT enough. mkdir here runs as the bot/service
+      identity, so the new directory is service-owned. The inner
+      subprocess (sudo -H -u <os_user>) can read but not write - the
+      same #347 regression that memory hit. A reinstall (or a manual
+      chown) is required for that case.
+    * Dev / single-user / users without a distinct os_user: lazy
+      bootstrap does the whole job. mkdir inherits the caller's
+      ownership, which IS the subprocess identity.
+
+    When chat_id is None (admin-less startup paths: tests, webhook
+    health checks, dev smoke tests) the function returns a fixed
+    `data_dir/home/anon` path. That path is only used when there is no
+    real user; it is not shared between actual Telegram users because
+    any real message carries a chat_id.
+
+    Mode 0755 with per-user chown at install time is what isolates
+    users from each other. Matches memory/ exactly (install.py
+    `_apply_migrate` uses the same ownership rules). Isolation comes
+    from ownership, not mode bits.
+
+    Unlike ensure_user_memory this does NOT seed a template file. The
+    home workspace is an empty directory that the user populates
+    themselves (cloning a repo, dropping notes, etc.).
+    """
+    # chat_id of None means we have no real Telegram session to key on
+    # (test runs, health checks, smoke runs without users.yaml). Use a
+    # fixed "anon" subdir so the resolver always returns a concrete
+    # path rather than None; avoids defensive None-checks at every call
+    # site.
+    if chat_id is None:
+        path = data_dir / "home" / "anon"
+    else:
+        path = data_dir / "home" / str(chat_id)
+
+    # mkdir parents=True is load-bearing: on a brand-new install the
+    # data_dir/home/ root may not exist yet (the installer creates it,
+    # but dev paths and the tests go straight through lazy bootstrap).
+    # exist_ok=True means this is safe to call on every session init.
+    path.mkdir(parents=True, exist_ok=True, mode=0o755)
+    # mkdir's mode= argument is masked by the process umask, so on a
+    # service configured with umask 0o027 the directory can end up 0o750
+    # instead of 0o755. That blocks group traversal and can break the
+    # inner subprocess when sudo -u targets a different identity. Force
+    # the intended bits explicitly - this is the same pattern install.py
+    # `_apply_migrate` uses after its mkdir calls. Idempotent on reuse.
+    os.chmod(path, 0o755)
+    return path
+
+
+def resolve_home_workspace(
+    chat_id: int | None,
+    config: Config,
+    data_dir: Path | None = None,
+) -> Path:
+    """
+    Return the user's home workspace path.
+
+    Resolution order:
+    1. `user.home_workspace` from users.yaml when set (admin override,
+       returned as-is with no second-guessing).
+    2. `<data_dir>/home/<chat_id>/`, auto-created via ensure_user_home().
+
+    All call sites (pool.py session init / get_workspace fallback,
+    bot.py `/workspace home` handler and workspace listings) MUST go
+    through this function rather than reading any global home field on
+    Config directly - that field was removed by issue #353. The old
+    global fallback (PROJECT_ROOT / "home" / shared "/opt/kai/home/")
+    was a multi-user privacy hazard (every user landed in a directory
+    every other user could read).
+
+    Passing `config` (not just its admin home field) keeps the
+    resolution decision local: the caller does not need to know whether
+    to prefer users.yaml or the per-user default.
+
+    The `data_dir` parameter is exposed for tests that want to thread a
+    tmp_path in cleanly (beats monkeypatching the module attribute,
+    because a test that forgets the patch would silently write to the
+    real `/var/lib/kai`). When None, we resolve from the module-level
+    DATA_DIR at CALL time (not definition time): a `data_dir=DATA_DIR`
+    default would freeze the value at import, defeating the
+    `monkeypatch.setattr("kai.backend.DATA_DIR", ...)` pattern that
+    pool.py and bot.py tests still depend on. The underlying
+    ensure_user_home already takes data_dir as a parameter; this
+    mirrors that signature.
+    """
+    # Admin-authored override from users.yaml wins outright. No check
+    # that the path exists - the config-load validator (config.py
+    # load_config) already filtered out bad paths, and a path that
+    # became invalid post-load (unmounted drive, etc.) is the admin's
+    # problem to fix, not ours to paper over.
+    user = config.get_user_config(chat_id) if chat_id is not None else None
+    if user and user.home_workspace:
+        return user.home_workspace
+
+    # No users.yaml override: use the per-user Kai-managed directory
+    # under data_dir. Resolve DATA_DIR from the module here (not as a
+    # default arg value) so monkeypatching `kai.backend.DATA_DIR` in
+    # tests still flows through. ensure_user_home is idempotent so
+    # calling it on every resolution is cheap.
+    if data_dir is None:
+        data_dir = DATA_DIR
+    return ensure_user_home(chat_id, data_dir)
 
 
 def build_foreign_workspace_reminder(workspace: Path, home_workspace: Path) -> str | None:

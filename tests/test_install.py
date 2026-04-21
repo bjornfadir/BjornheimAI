@@ -800,7 +800,15 @@ class TestCmdConfig:
         assert data["users"][0]["role"] == "admin"
 
     def test_advanced_user_options(self, tmp_path, monkeypatch):
-        """Advanced path writes os_user and home_workspace, skips CLAUDE_USER."""
+        """
+        Advanced path writes os_user and skips CLAUDE_USER.
+
+        Post-#353: the wizard no longer prompts for home_workspace and
+        the admin's users.yaml entry does not carry that field - the
+        admin lands in DATA_DIR/home/<chat_id>/ like any other user.
+        See test_wizard_defaults_do_not_reintroduce_shared_home for the
+        regression guard.
+        """
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
         monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
@@ -817,7 +825,7 @@ class TestCmdConfig:
                 "admin",  # admin display name
                 "true",  # advanced user options
                 "testuser",  # os_user
-                str(tmp_path),  # home_workspace
+                # no home_workspace prompt post-#353
                 "polling",  # transport
                 "claude",  # agent backend
                 "sonnet",  # model
@@ -845,17 +853,151 @@ class TestCmdConfig:
 
         _cmd_config()
 
-        # Verify users.yaml has os_user and home_workspace
+        # Verify users.yaml has os_user and (post-#353) NO home_workspace.
+        # The admin lands in DATA_DIR/home/<chat_id>/ like any other user;
+        # the field is absent from the wizard output by design.
         yaml_path = tmp_path / "users.yaml"
         assert yaml_path.exists()
         data = yaml.safe_load(yaml_path.read_text())
         entry = data["users"][0]
         assert entry["os_user"] == "testuser"
-        assert entry["home_workspace"] == str(tmp_path.resolve())
+        assert "home_workspace" not in entry, (
+            "Wizard regression: admin entry should not carry home_workspace post-#353. See _cmd_config in install.py."
+        )
 
         # CLAUDE_USER should not be in the env (skipped because os_user was set)
         conf = json.loads((tmp_path / "install.conf").read_text())
         assert "CLAUDE_USER" not in conf["env"]
+
+    def test_wizard_defaults_do_not_reintroduce_shared_home(self, tmp_path, monkeypatch):
+        """
+        Regression guard for spec #353.
+
+        Prior to #353, the wizard defaulted home_workspace to a shared
+        PROJECT_ROOT/home directory. That shared default was the source
+        of the multi-user privacy hazard the spec exists to fix. This
+        test pins the post-#353 behavior across BOTH wizard paths:
+
+        1. The non-advanced path (advanced=false) must not emit a
+           home_workspace key into the admin's users.yaml entry.
+        2. The advanced path (advanced=true, no explicit home_workspace
+           prompt) must also not emit one.
+        3. The generated env must not carry a CLAUDE_WORKSPACE override
+           (the env var that pre-#353 wired the shared global home).
+
+        If any future change re-introduces a global default home, one
+        of these three assertions will fail.
+        """
+        # ---- Path 1: non-advanced wizard ----
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        inputs_basic = iter(
+            [
+                "/opt/kai",  # install dir
+                "/var/lib/kai",  # data dir
+                "kai",  # service user
+                "darwin",  # platform
+                "fake-token",  # bot token
+                "12345",  # admin telegram ID
+                "admin",  # admin display name
+                "false",  # advanced user options -> no os_user, no home prompt
+                "polling",  # transport
+                "claude",  # agent backend
+                "sonnet",  # model
+                "120",  # timeout
+                "10.0",  # budget
+                "200000",  # max context window
+                "80",  # autocompact pct
+                "8080",  # port
+                "test-secret",  # webhook secret
+                "~/Projects",  # workspace base
+                "",  # allowed workspaces
+                "false",  # pr review enabled
+                "900",  # pr review timeout
+                "1.0",  # pr review budget
+                "false",  # issue triage enabled
+                "",  # github notify chat id
+                "false",  # voice
+                "false",  # tts
+                "",  # claude user (empty)
+                "false",  # memory enabled
+                "",  # perplexity key (empty)
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs_basic))
+        _cmd_config()
+
+        yaml_path = tmp_path / "users.yaml"
+        data = yaml.safe_load(yaml_path.read_text())
+        basic_entry = data["users"][0]
+        assert "home_workspace" not in basic_entry, (
+            "Regression: non-advanced wizard re-introduced a shared home_workspace default. "
+            "Spec #353 requires per-user homes under DATA_DIR/home/<chat_id>/."
+        )
+
+        conf = json.loads((tmp_path / "install.conf").read_text())
+        # CLAUDE_WORKSPACE was the legacy env that wired a global home;
+        # pinning it absent ensures the wizard never re-emits the var.
+        assert "CLAUDE_WORKSPACE" not in conf["env"], (
+            "Regression: wizard wrote CLAUDE_WORKSPACE env. Spec #353 removed the global home field; "
+            "pool.py + bot.py now resolve home per chat_id."
+        )
+
+        # ---- Path 2: advanced wizard (admin chooses os_user) ----
+        # Re-run the wizard from a clean tmp dir to verify the advanced
+        # path also stays clean. We use a sibling dir so monkeypatched
+        # PROJECT_ROOT and INSTALL_CONF point somewhere fresh.
+        adv_root = tmp_path / "adv"
+        adv_root.mkdir()
+        monkeypatch.chdir(adv_root)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", adv_root / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", adv_root)
+
+        inputs_advanced = iter(
+            [
+                "/opt/kai",
+                "/var/lib/kai",
+                "kai",
+                "darwin",
+                "fake-token",
+                "12345",
+                "admin",
+                "true",  # advanced -> os_user prompt
+                "testuser",  # os_user (no home_workspace prompt should follow)
+                "polling",
+                "claude",
+                "sonnet",
+                "120",
+                "10.0",
+                "200000",
+                "80",
+                "8080",
+                "test-secret",
+                "~/Projects",
+                "",
+                "false",
+                "900",
+                "1.0",
+                "false",
+                "",
+                "false",
+                "false",
+                "false",  # memory enabled
+                "",  # perplexity key
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs_advanced))
+        _cmd_config()
+
+        adv_data = yaml.safe_load((adv_root / "users.yaml").read_text())
+        adv_entry = adv_data["users"][0]
+        assert "home_workspace" not in adv_entry, (
+            "Regression: advanced wizard re-introduced home_workspace. The wizard removed the prompt "
+            "in spec #353; an admin who needs a custom path must hand-edit users.yaml."
+        )
 
     def test_goose_backend_writes_env(self, tmp_path, monkeypatch):
         """Selecting goose backend writes AGENT_BACKEND to env."""
@@ -2427,6 +2569,250 @@ class TestApplyMigratePerUserMemory:
         # still pending) is exactly the scenario this test guards.
         assert not (data_path / "memory" / "4242").exists()
         assert not (data_path / "memory" / "MEMORY.md").exists()
+
+
+class TestApplyMigratePerUserHome:
+    """
+    Tests for the per-user home workspace provisioning in _apply_migrate
+    (#353). Mirrors TestApplyMigratePerUserMemory shape; the install-time
+    block is a pure file-system effect (mkdir + chown + chmod), so these
+    tests exercise the directory layout that gets produced.
+    """
+
+    def _write_users_yaml(self, path: Path, body: str) -> None:
+        path.write_text(body)
+
+    def _setup(self, tmp_path, monkeypatch) -> Path:
+        """Common scaffolding: project root, data dirs, no-op chown."""
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path / "src")
+        (tmp_path / "src").mkdir()
+        data_path = tmp_path / "data"
+        data_path.mkdir()
+        (data_path / "logs").mkdir()
+        (data_path / "memory").mkdir()
+        # chown is a no-op in tests: we are not root, and the test is
+        # only checking which paths got created, not their ownership.
+        monkeypatch.setattr("kai.install.os.chown", lambda *a: None)
+        return data_path
+
+    def test_no_override_creates_home_chat_id_dir(self, tmp_path, monkeypatch):
+        """
+        Case 1 (default): a user with no users.yaml home_workspace lands
+        in DATA_DIR/home/<chat_id>/. This is the spec #353 default.
+        """
+        data_path = self._setup(tmp_path, monkeypatch)
+        users_yaml = tmp_path / "users.yaml"
+        self._write_users_yaml(
+            users_yaml,
+            "users:\n  - telegram_id: 5555\n    name: u\n    role: admin\n",
+        )
+
+        _apply_migrate(
+            data_path,
+            tmp_path / "install",
+            svc_uid=501,
+            svc_gid=20,
+            dry_run=False,
+            users_yaml_path=users_yaml,
+        )
+
+        assert (data_path / "home" / "5555").is_dir()
+
+    def test_override_under_data_dir_provisions_override_path(self, tmp_path, monkeypatch):
+        """
+        Case 2 (W2 review fix): when home_workspace is set to a path
+        INSIDE DATA_DIR, the installer must create THAT path (the one
+        runtime resolve_home_workspace returns), NOT the default
+        DATA_DIR/home/<chat_id>/ slot.
+
+        Pre-fix bug: installer always created home/<chat_id>/, leaving
+        the actual override path un-provisioned. First runtime write to
+        the override would crash. This test pins the corrected behavior.
+        """
+        data_path = self._setup(tmp_path, monkeypatch)
+        # Override path lives under data_path/custom_workspace/.
+        override = data_path / "custom_workspace"
+        users_yaml = tmp_path / "users.yaml"
+        self._write_users_yaml(
+            users_yaml,
+            (f"users:\n  - telegram_id: 6666\n    name: u\n    role: admin\n    home_workspace: {override}\n"),
+        )
+
+        _apply_migrate(
+            data_path,
+            tmp_path / "install",
+            svc_uid=501,
+            svc_gid=20,
+            dry_run=False,
+            users_yaml_path=users_yaml,
+        )
+
+        # The override path itself was created.
+        assert override.is_dir(), f"Override path {override} not provisioned"
+        # The default slot must NOT be created - it is never used at
+        # runtime when an override is set, so creating it would leave a
+        # dead directory under DATA_DIR.
+        assert not (data_path / "home" / "6666").exists(), (
+            "Default per-user slot should not be created when override is set"
+        )
+
+    def test_override_outside_data_dir_skips_provisioning(self, tmp_path, monkeypatch):
+        """
+        Case 3: when home_workspace points OUTSIDE DATA_DIR, the
+        installer must skip the entry entirely. The override is
+        operator-managed (a clone of a dev tree, a synced volume, etc.)
+        and we have no business chowning it.
+        """
+        data_path = self._setup(tmp_path, monkeypatch)
+        # Path outside data_path: a sibling under tmp_path.
+        external = tmp_path / "external_home"
+        external.mkdir()
+        users_yaml = tmp_path / "users.yaml"
+        self._write_users_yaml(
+            users_yaml,
+            (f"users:\n  - telegram_id: 7777\n    name: u\n    role: admin\n    home_workspace: {external}\n"),
+        )
+
+        _apply_migrate(
+            data_path,
+            tmp_path / "install",
+            svc_uid=501,
+            svc_gid=20,
+            dry_run=False,
+            users_yaml_path=users_yaml,
+        )
+
+        # Default slot must NOT be created (we honored the override).
+        assert not (data_path / "home" / "7777").exists()
+        # External path must be left strictly alone (we did not chmod
+        # or otherwise touch it - verify it is still empty).
+        assert external.is_dir()
+        assert list(external.iterdir()) == []
+
+    def test_creates_home_root_when_missing(self, tmp_path, monkeypatch):
+        """
+        W3 review fix: if data_path/home/ does not exist when the
+        per-user block runs (e.g., a future refactor splits
+        _apply_directories from _apply_migrate), the block must still
+        provision per-user dirs rather than silently no-op'ing. The
+        defensive home_root.mkdir guarantees this.
+
+        Pre-fix: the block was guarded by `if home_root.is_dir():`
+        which silently skipped everything when the parent was absent.
+
+        Round 2 review fix: home_root must end up at exactly 0o755,
+        not whatever the umask leaves behind. mkdir(mode=0o755) is
+        masked by the process umask; under the production service
+        umask of 0o027 this would leave home_root at 0o750, blocking
+        group traversal for distinct-os_user subprocesses. We set a
+        hostile umask inside the test to prove the explicit chmod
+        survives it.
+        """
+        import os as _os
+        import stat
+
+        data_path = self._setup(tmp_path, monkeypatch)
+        # Note: _setup does NOT create data_path/home. The defensive
+        # mkdir in _apply_migrate must create it.
+        assert not (data_path / "home").exists()
+
+        users_yaml = tmp_path / "users.yaml"
+        self._write_users_yaml(
+            users_yaml,
+            "users:\n  - telegram_id: 8888\n    name: u\n    role: admin\n",
+        )
+
+        # Hostile umask matches the production service launchd config.
+        # Without the explicit os.chmod after mkdir, home_root would
+        # come out as 0o750 here.
+        prev_umask = _os.umask(0o027)
+        try:
+            _apply_migrate(
+                data_path,
+                tmp_path / "install",
+                svc_uid=501,
+                svc_gid=20,
+                dry_run=False,
+                users_yaml_path=users_yaml,
+            )
+        finally:
+            _os.umask(prev_umask)
+
+        # Both the parent home/ and the per-user slot exist.
+        home_root = data_path / "home"
+        assert home_root.is_dir()
+        assert (home_root / "8888").is_dir()
+        # Both at exactly 0o755 (group/other read+traverse, no write).
+        assert stat.S_IMODE(home_root.stat().st_mode) == 0o755, (
+            f"home_root mode {oct(stat.S_IMODE(home_root.stat().st_mode))} - "
+            "umask masked the mkdir mode and explicit chmod did not run"
+        )
+        assert stat.S_IMODE((home_root / "8888").stat().st_mode) == 0o755
+
+    def test_override_resolves_through_data_path_symlink(self, tmp_path, monkeypatch):
+        """
+        Round 3 review fix: when DATA_DIR traverses a symlink (the
+        macOS case where /var/lib is a symlink to /private/var/lib),
+        the override-containment check must resolve both sides.
+
+        Pre-fix: `_collect_user_home_overrides` calls `Path.resolve()`
+        on every override but `_apply_migrate` compared the resolved
+        override against an unresolved data_path. An operator who
+        wrote `home_workspace: /private/var/lib/kai/custom` against a
+        `data_path` of `/var/lib/kai` would get is_relative_to=False
+        and the entry would silently fall through to Case 3 (skip).
+        First-write under a distinct os_user would then crash.
+
+        This test pins the symlink case by creating a symlink that
+        points at the real data_path and passing the symlink as the
+        installer's data_path argument. Without `data_path.resolve()`
+        the override (already resolved through the symlink) compares
+        as external and the test fails.
+        """
+        # Real data_path lives under tmp_path/real_data; the installer
+        # is invoked with a symlink at tmp_path/data_link that points
+        # at it. This mirrors the macOS /var/lib -> /private/var/lib
+        # situation that triggered the round-3 review finding.
+        real_data = tmp_path / "real_data"
+        real_data.mkdir()
+        (real_data / "logs").mkdir()
+        (real_data / "memory").mkdir()
+        data_link = tmp_path / "data_link"
+        data_link.symlink_to(real_data)
+
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path / "src")
+        (tmp_path / "src").mkdir()
+        monkeypatch.setattr("kai.install.os.chown", lambda *a: None)
+
+        # Override path written against the REAL location (post-resolve
+        # form), simulating an operator who already canonicalized in
+        # users.yaml. _collect_user_home_overrides will resolve() it
+        # again to the same value.
+        override_real = real_data / "custom_workspace"
+        users_yaml = tmp_path / "users.yaml"
+        self._write_users_yaml(
+            users_yaml,
+            (f"users:\n  - telegram_id: 9999\n    name: u\n    role: admin\n    home_workspace: {override_real}\n"),
+        )
+
+        # Pass the symlinked path as data_path - this is what the
+        # round-3 bug needed to surface.
+        _apply_migrate(
+            data_link,
+            tmp_path / "install",
+            svc_uid=501,
+            svc_gid=20,
+            dry_run=False,
+            users_yaml_path=users_yaml,
+        )
+
+        # The override path under the REAL data dir was provisioned -
+        # proves the symlink-aware containment check classified it as
+        # internal (Case 2) instead of external (Case 3).
+        assert override_real.is_dir(), (
+            "Override under symlinked DATA_DIR was not provisioned - "
+            "is_relative_to comparison did not resolve data_path"
+        )
 
 
 # ── Service lifecycle ────────────────────────────────────────────────

@@ -51,6 +51,17 @@ _ALLOWED_TYPES: frozenset[str] = frozenset({"exchange", "fact"})
 # fact. Matches the "20 characters" rule in the extractor prompt.
 _CONFIRMATION_QUOTE_MIN_CHARS = 20
 
+# Maximum length (chars) for the user portion of the Haiku payload.
+# Lives here next to its sole consumer (`_build_extraction_payload`
+# below) rather than in memory.py; spec 360 removed Track 1, which was
+# the only other reader, so a per-module local is the cleanest home now.
+# The assistant-side counterpart `memory._MAX_ASSISTANT_CHARS` stays in
+# memory.py because moving it would be churn unrelated to spec 360.
+# 2000 chars keeps the embedding focused on semantic core: users do
+# occasionally paste long content (logs, code, error traces) and an
+# uncapped paste would dominate the per-call Haiku token cost.
+_MAX_USER_CHARS = 2000
+
 # Rejects one-word affirmations and short generic acknowledgments as
 # "laundered" confirmations. Haiku should already filter these per the
 # prompt; this is defense-in-depth enforced on the Python side. Anchored
@@ -345,16 +356,14 @@ def _build_extraction_payload(user_text: str, assistant_text: str) -> str:
     # Cap both sides before role-label stripping so per-call Haiku
     # token cost stays bounded and --max-budget-usd is a real ceiling,
     # not an optimistic estimate. Both caps are applied here, locally,
-    # and not inherited from callers: add_user_utterance truncates its
-    # OWN local parameter inside memory.py, but that mutation is scoped
-    # to that stack frame and never touches the user_text variable in
-    # bot.py or extract_and_store. So a 50k-char paste would flow
-    # straight into the Haiku payload unless truncated here. Confirmation
-    # quotes sit inside the user turn but are short by construction (the
+    # because user_text and assistant_text arrive at full length from
+    # bot.py: a 50k-char paste would flow straight into the Haiku
+    # payload unless truncated at this boundary. Confirmation quotes
+    # sit inside the user turn but are short by construction (the
     # _CONFIRMATION_QUOTE_MIN_CHARS floor is 20 chars), so a 2000-char
     # user cap preserves all realistic confirmation signal.
-    if len(user_text) > memory._MAX_USER_CHARS:
-        user_text = user_text[: memory._MAX_USER_CHARS] + "..."
+    if len(user_text) > _MAX_USER_CHARS:
+        user_text = user_text[:_MAX_USER_CHARS] + "..."
     if len(assistant_text) > memory._MAX_ASSISTANT_CHARS:
         assistant_text = assistant_text[: memory._MAX_ASSISTANT_CHARS] + "..."
     safe_user = _strip_role_labels(user_text)

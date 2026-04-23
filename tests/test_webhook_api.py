@@ -17,6 +17,10 @@ from kai.webhook import (
     _handle_get_job,
     _handle_get_jobs,
     _handle_github,
+    _handle_memory_add,
+    _handle_memory_delete_all,
+    _handle_memory_search,
+    _handle_memory_stats,
     _handle_schedule,
     _handle_send_file,
     _handle_send_message,
@@ -1985,3 +1989,770 @@ class TestWALMode:
             assert row[0] == "wal"
         finally:
             await sessions.close_db()
+
+
+# ── /api/memory/* ────────────────────────────────────────────────────
+# Tests for the four memory REST endpoints. The underlying primitives
+# (memory.add_structured, memory.search, memory.get_stats,
+# memory.delete_all, memory.is_enabled) are independently tested in
+# tests/test_memory.py - these tests cover only handler-level behavior
+# (auth, validation, JSON serialization, status-code mapping, and the
+# symmetric is_enabled() precheck).
+#
+# Patch targets are kai.memory.<func> because webhook.py imports memory
+# as a module (`from kai import memory`) and calls it via the module
+# attribute. Patching `kai.webhook.add_structured` would miss because
+# that name does not exist on webhook.
+
+
+class TestMemoryAdd:
+    """POST /api/memory/add"""
+
+    async def test_returns_200_with_id_on_success(self, mock_request):
+        """Happy path: enabled memory + valid body -> 200 with the new id."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "User likes Earl Grey"})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.add_structured", return_value="mem-uuid-123"),
+        ):
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert body == {"id": "mem-uuid-123"}
+
+    async def test_returns_503_when_memory_disabled(self, mock_request):
+        """Precheck path: is_enabled() False -> 503; primitive NOT called."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "anything"})
+
+        with patch("kai.memory.is_enabled", return_value=False), patch("kai.memory.add_structured") as mock_add:
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory system disabled"}
+        # The whole point of the precheck is to avoid invoking the
+        # primitive when memory is off; assert that contract explicitly.
+        mock_add.assert_not_called()
+
+    async def test_returns_500_when_storage_fails(self, mock_request):
+        """Storage-failure path: enabled but add returns None -> 500."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "anything"})
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.add_structured", return_value=None):
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory storage failed"}
+
+    async def test_returns_400_on_missing_content(self, mock_request):
+        """Required-field validation: missing `content` -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"memory_type": "fact"})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "content" in body["error"]
+
+    async def test_returns_400_on_whitespace_only_content(self, mock_request):
+        """Empty-after-strip check: whitespace-only content -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "   \n\t  "})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+
+    async def test_returns_400_on_invalid_json(self, mock_request):
+        """Malformed JSON body -> 400 with a clear error."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(side_effect=json.JSONDecodeError("expecting value", "", 0))
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Invalid JSON"}
+
+    async def test_returns_401_on_missing_secret(self, mock_request):
+        """No X-Webhook-Secret header -> 401 from the decorator."""
+        mock_request.headers = {}
+        mock_request.json = AsyncMock(return_value={"content": "x"})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 401
+
+    async def test_returns_401_on_wrong_secret(self, mock_request):
+        """Wrong X-Webhook-Secret -> 401 from the decorator."""
+        mock_request.headers = {"X-Webhook-Secret": "nope"}
+        mock_request.json = AsyncMock(return_value={"content": "x"})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 401
+
+    async def test_passes_optional_fields_through(self, mock_request):
+        """memory_type, tags, metadata are forwarded to add_structured verbatim."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(
+            return_value={
+                "content": "User prefers dark mode",
+                "memory_type": "preference",
+                "tags": ["ui", "preference"],
+                "metadata": {"source": "explicit"},
+            }
+        )
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.add_structured", return_value="id-1") as mock_add,
+        ):
+            await _handle_memory_add(mock_request)
+
+        # Verify each optional field reached the primitive intact - if any
+        # got dropped or renamed, this catches the regression at the
+        # handler boundary rather than letting it surface as missing data
+        # in the vector store.
+        kwargs = mock_add.call_args.kwargs
+        assert kwargs["memory_type"] == "preference"
+        assert kwargs["tags"] == ["ui", "preference"]
+        assert kwargs["metadata"] == {"source": "explicit"}
+
+    async def test_stringifies_chat_id_for_user_id(self, mock_request):
+        """Handler converts int chat_id -> str user_id at the memory boundary.
+
+        This is load-bearing: Mem0 keys memories by the string form of
+        user_id. A missed cast would isolate API-stored memories from the
+        existing facts under the same chat_id (silently, since both writes
+        succeed).
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "chat_id": 456})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.add_structured", return_value="id-1") as mock_add,
+        ):
+            await _handle_memory_add(mock_request)
+
+        kwargs = mock_add.call_args.kwargs
+        assert kwargs["user_id"] == "456"
+        assert isinstance(kwargs["user_id"], str)
+
+    async def test_returns_403_on_unauthorized_chat_id(self, mock_request):
+        """chat_id not in allowed_user_ids -> 403, primitive not called."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        # 999 is not in the fixture's allowed_user_ids = {123, 456}
+        mock_request.json = AsyncMock(return_value={"content": "x", "chat_id": 999})
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.add_structured") as mock_add:
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 403
+        mock_add.assert_not_called()
+
+    async def test_returns_500_when_add_structured_raises(self, mock_request):
+        """Unexpected exception in add_structured() -> clean 500 JSON.
+
+        Defense-in-depth: add_structured catches its own exceptions and
+        returns None (handled by the None-check 500 path), but the
+        handler also wraps in case the call raises BEFORE reaching that
+        internal try (init failure, bad argument shape, etc.). Pins the
+        contract that BOTH failure modes produce the same 500 JSON body.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x"})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.add_structured", side_effect=RuntimeError("boom")),
+        ):
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory storage failed"}
+
+    async def test_returns_400_on_non_string_content(self, mock_request):
+        """Non-string content (number, bool, list, etc.) -> 400, not 500.
+
+        Without the isinstance guard at the API boundary, a JSON number
+        or null reaching .strip() would raise AttributeError and escape
+        to aiohttp as an unstyled 500. This test pins the contract that
+        the handler always returns a clean 400 with a JSON error body.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": 123})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "content" in body["error"]
+
+    async def test_returns_400_on_non_string_memory_type(self, mock_request):
+        """memory_type must be a string when provided."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "memory_type": 42})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "memory_type" in body["error"]
+
+    async def test_treats_null_memory_type_as_default(self, mock_request):
+        """memory_type: null falls back to "fact" rather than 400.
+
+        Matches the lenient None handling already used for tags and
+        metadata (None is equivalent to omitting the field). Pinning
+        the contract so a future "simplify" that switches back to
+        `payload.get("memory_type", "fact")` and rejects explicit
+        nulls would fail this test.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "memory_type": None})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.add_structured", return_value="id-1") as mock_add,
+        ):
+            resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 200
+        assert mock_add.call_args.kwargs["memory_type"] == "fact"
+
+    async def test_returns_400_on_non_list_tags(self, mock_request):
+        """tags must be a list when provided (not a string or dict)."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "tags": "single-tag"})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "tags" in body["error"]
+
+    async def test_returns_400_on_tags_with_non_string_element(self, mock_request):
+        """All tag elements must be strings; mixed-type list -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "tags": ["ok", 42]})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "tags" in body["error"]
+
+    async def test_returns_400_on_non_dict_metadata(self, mock_request):
+        """metadata must be a JSON object when provided."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"content": "x", "metadata": ["a", "b"]})
+
+        resp = await _handle_memory_add(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "metadata" in body["error"]
+
+
+class TestMemorySearch:
+    """POST /api/memory/search"""
+
+    async def test_returns_200_with_results(self, mock_request):
+        """Happy path: results from search() are serialized into {"results": [...]}."""
+        from kai.memory import MemoryResult
+
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "tea preferences"})
+
+        fake_hit = MemoryResult(
+            id="m1",
+            text="User likes Earl Grey",
+            score=0.85,
+            memory_type="fact",
+            metadata={"source": "extracted", "tags": ["preference"]},
+            created_at="2026-04-23T10:00:00Z",
+        )
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.search", return_value=[fake_hit]):
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        # Verify the result structure preserves the dataclass shape via
+        # asdict; metadata round-trips as a nested dict including its
+        # tags list.
+        assert len(body["results"]) == 1
+        assert body["results"][0]["id"] == "m1"
+        assert body["results"][0]["text"] == "User likes Earl Grey"
+        assert body["results"][0]["metadata"]["tags"] == ["preference"]
+
+    async def test_returns_200_with_empty_results(self, mock_request):
+        """No matches: still 200, just an empty list - 503 is reserved for disabled."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "no matches"})
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.search", return_value=[]):
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert body == {"results": []}
+
+    async def test_returns_503_when_memory_disabled(self, mock_request):
+        """Precheck overrides search()'s graceful-degrade [] return."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "anything"})
+
+        with patch("kai.memory.is_enabled", return_value=False), patch("kai.memory.search") as mock_search:
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 503
+        # Without the precheck, search() would have returned [] and the
+        # API would have returned 200 - indistinguishable from "no
+        # matches". Asserting not_called makes the M-8 contract a test
+        # invariant, not just a code comment.
+        mock_search.assert_not_called()
+
+    async def test_returns_400_on_missing_query(self, mock_request):
+        """Required-field validation."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "query" in body["error"]
+
+    async def test_returns_400_on_empty_query(self, mock_request):
+        """Whitespace-only query is rejected like missing."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "   "})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+
+    async def test_returns_401_on_bad_secret(self, mock_request):
+        mock_request.headers = {"X-Webhook-Secret": "nope"}
+        mock_request.json = AsyncMock(return_value={"query": "x"})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 401
+
+    async def test_passes_limit_through(self, mock_request):
+        """Caller-supplied `limit` is forwarded as-is to search()."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "limit": 5})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.search", return_value=[]) as mock_search,
+        ):
+            await _handle_memory_search(mock_request)
+
+        assert mock_search.call_args.kwargs["limit"] == 5
+
+    async def test_passes_none_limit_when_omitted(self, mock_request):
+        """When `limit` is omitted, the handler passes None so search()
+        falls back to its config default rather than a hardcoded number."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x"})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.search", return_value=[]) as mock_search,
+        ):
+            await _handle_memory_search(mock_request)
+
+        assert mock_search.call_args.kwargs["limit"] is None
+
+    async def test_returns_400_on_non_string_query(self, mock_request):
+        """Non-string query (number, bool, list, etc.) -> 400.
+
+        Same isinstance-before-.strip() guard as content in the add
+        handler. Pinning the contract so a future refactor can't
+        regress to the AttributeError-escapes-as-500 failure mode.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": 42})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "query" in body["error"]
+
+    async def test_returns_400_on_non_int_limit(self, mock_request):
+        """`limit` must be an int when provided; string -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "limit": "five"})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        assert "limit" in body["error"]
+
+    async def test_returns_400_on_zero_limit(self, mock_request):
+        """`limit` must be positive; 0 -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "limit": 0})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+
+    async def test_returns_400_on_negative_limit(self, mock_request):
+        """Negative `limit` -> 400."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "limit": -3})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+
+    async def test_returns_400_on_bool_limit(self, mock_request):
+        """`limit: true` rejected: bool is an int subclass in Python.
+
+        Without the explicit isinstance(limit, bool) short-circuit,
+        `{"limit": true}` would pass `isinstance(limit, int)` and be
+        treated as `limit=1`, silently truncating results. This test
+        is the contract that this Python-specific footgun stays closed.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "limit": True})
+
+        resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 400
+
+    async def test_returns_500_when_search_raises(self, mock_request):
+        """Unexpected exception in search() -> clean 500 JSON, not aiohttp 500 page.
+
+        Defense-in-depth: search() catches its own exceptions today, but
+        the handler still wraps to ensure the 500 contract is structural
+        rather than dependent on the primitive's internal behavior.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x"})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.search", side_effect=RuntimeError("boom")),
+        ):
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory search failed"}
+
+    async def test_returns_500_when_serialization_raises(self, mock_request):
+        """asdict failure on a non-dataclass return -> wrapped into 500.
+
+        Pins the contract that the try/except guard covers BOTH the
+        primitive call and the asdict serialization, not just the
+        primitive. Without the wider guard, asdict raising TypeError
+        would escape to aiohttp as an HTML 500.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x"})
+
+        # Returning a non-dataclass forces asdict() to TypeError.
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.search", return_value=["not a dataclass"]),
+        ):
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory search failed"}
+
+    async def test_returns_403_on_unauthorized_chat_id(self, mock_request):
+        """chat_id not in allowed_user_ids -> 403, primitive not called."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"query": "x", "chat_id": 999})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.search") as mock_search,
+        ):
+            resp = await _handle_memory_search(mock_request)
+
+        assert resp.status == 403
+        mock_search.assert_not_called()
+
+
+class TestMemoryStats:
+    """GET /api/memory/stats"""
+
+    async def test_returns_200_with_stats_at_top_level(self, mock_request):
+        """Stats are returned bare, not wrapped in {"results": ...}."""
+        from kai.memory import MemoryStats
+
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {}
+
+        fake_stats = MemoryStats(
+            total_count=5,
+            by_type={"fact": 4, "preference": 1},
+            extracted_count=4,
+            by_tag={"food": 2, "ui": 1},
+            confidence_min=0.7,
+            confidence_median=0.8,
+            confidence_max=0.95,
+            confidence_below_0_7=0,
+            confidence_below_0_6=0,
+            confirmation_quote_count=1,
+            by_prompt_version={"v2": 4},
+        )
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.get_stats", return_value=fake_stats):
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        # Top-level fields means body["total_count"] not body["stats"]["total_count"].
+        # Catches a regression that wraps the stats dict accidentally.
+        assert body["total_count"] == 5
+        assert body["extracted_count"] == 4
+        assert body["by_type"] == {"fact": 4, "preference": 1}
+
+    async def test_serializes_null_confidence_fields(self, mock_request):
+        """Fresh user (extracted_count == 0): confidence_* fields ship as JSON null.
+
+        The handler MUST preserve None as JSON null, not coerce to 0 or
+        omit the field, because IDENTITY.md tells inner Claude that null
+        means "no extracted facts to summarize" - changing the encoding
+        would silently break that contract.
+        """
+        from kai.memory import MemoryStats
+
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {}
+
+        empty_stats = MemoryStats(total_count=0, by_type={})
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.get_stats", return_value=empty_stats):
+            resp = await _handle_memory_stats(mock_request)
+
+        body = json.loads(resp.body.decode())
+        assert body["confidence_min"] is None
+        assert body["confidence_median"] is None
+        assert body["confidence_max"] is None
+
+    async def test_returns_503_when_memory_disabled(self, mock_request):
+        """Precheck overrides get_stats()'s zeroed-stats degrade."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {}
+
+        with patch("kai.memory.is_enabled", return_value=False), patch("kai.memory.get_stats") as mock_get_stats:
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 503
+        mock_get_stats.assert_not_called()
+
+    async def test_reads_chat_id_from_query_string(self, mock_request):
+        """GET endpoint: chat_id comes from query params, mirroring _handle_get_jobs."""
+        from kai.memory import MemoryStats
+
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        # 456 is in allowed_user_ids; query params come in as strings.
+        mock_request.query = {"chat_id": "456"}
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.get_stats", return_value=MemoryStats(total_count=0, by_type={})) as mock_get_stats,
+        ):
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 200
+        # Verify the int->str cast happened at the memory boundary.
+        assert mock_get_stats.call_args.kwargs["user_id"] == "456"
+
+    async def test_returns_401_on_bad_secret(self, mock_request):
+        mock_request.headers = {"X-Webhook-Secret": "nope"}
+        mock_request.query = {}
+
+        resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 401
+
+    async def test_returns_403_on_unauthorized_chat_id(self, mock_request):
+        """Query-string chat_id outside allowed_user_ids -> 403."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {"chat_id": "999"}
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.get_stats") as mock_get_stats:
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 403
+        mock_get_stats.assert_not_called()
+
+    async def test_returns_500_when_get_stats_raises(self, mock_request):
+        """Unexpected exception in get_stats() -> clean 500 JSON.
+
+        get_stats() doesn't catch its own exceptions today (the
+        aggregation could raise on a malformed row), so this guard is
+        the actual error contract, not just defense-in-depth.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {}
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.get_stats", side_effect=RuntimeError("boom")),
+        ):
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory stats failed"}
+
+    async def test_returns_500_when_serialization_raises(self, mock_request):
+        """asdict failure on a non-dataclass return -> wrapped into 500.
+
+        Same wider-guard contract as the search handler: try/except
+        covers both get_stats() and the asdict step. A future refactor
+        that returns a dict (or anything non-dataclass) instead of
+        MemoryStats would otherwise leak as HTML 500.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.query = {}
+
+        # asdict() raises TypeError on a plain dict.
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.get_stats", return_value={"not": "a dataclass"}),
+        ):
+            resp = await _handle_memory_stats(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory stats failed"}
+
+
+class TestMemoryDeleteAll:
+    """DELETE /api/memory/all"""
+
+    _CONFIRM = "delete-all-memories"
+
+    async def test_returns_200_on_correct_confirm(self, mock_request):
+        """Happy path: correct confirm token -> 200 with deletion ack."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM})
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.delete_all"):
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert body == {"status": "deleted"}
+
+    async def test_returns_400_on_missing_confirm(self, mock_request):
+        """No confirm field -> 400; delete_all is never called."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={})
+
+        with patch("kai.memory.delete_all") as mock_del:
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 400
+        body = json.loads(resp.body.decode())
+        # Error body must echo the expected token so a stray curl gets
+        # a directly fixable error message.
+        assert self._CONFIRM in body["error"]
+        mock_del.assert_not_called()
+
+    async def test_returns_400_on_wrong_confirm(self, mock_request):
+        """Wrong confirm value -> 400; delete_all is never called."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": "yes-please"})
+
+        with patch("kai.memory.delete_all") as mock_del:
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 400
+        mock_del.assert_not_called()
+
+    async def test_returns_503_when_memory_disabled(self, mock_request):
+        """Precheck blocks delete even when confirm is correct."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM})
+
+        with patch("kai.memory.is_enabled", return_value=False), patch("kai.memory.delete_all") as mock_del:
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 503
+        # The user explicitly asked for a delete; if memory is off, we
+        # tell them the delete didn't actually run rather than silently
+        # acking a no-op.
+        mock_del.assert_not_called()
+
+    async def test_calls_delete_all_with_stringified_user_id(self, mock_request):
+        """int -> str cast at the memory boundary, same as add."""
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM, "chat_id": 456})
+
+        with patch("kai.memory.is_enabled", return_value=True), patch("kai.memory.delete_all") as mock_del:
+            await _handle_memory_delete_all(mock_request)
+
+        assert mock_del.call_args.kwargs["user_id"] == "456"
+        assert isinstance(mock_del.call_args.kwargs["user_id"], str)
+
+    async def test_returns_401_on_bad_secret(self, mock_request):
+        mock_request.headers = {"X-Webhook-Secret": "nope"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM})
+
+        resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 401
+
+    async def test_returns_500_when_delete_all_raises(self, mock_request):
+        """Unexpected exception in delete_all() -> clean 500 JSON.
+
+        Same defense-in-depth pattern as the search and stats handlers
+        (added in the prior review round). delete_all() catches its own
+        internal errors today but the handler-level guard makes the 500
+        contract structural rather than primitive-dependent.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.delete_all", side_effect=RuntimeError("boom")),
+        ):
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 500
+        body = json.loads(resp.body.decode())
+        assert body == {"error": "Memory delete failed"}
+
+    async def test_returns_403_on_unauthorized_chat_id(self, mock_request):
+        """chat_id not in allowed_user_ids -> 403, primitive not called.
+
+        Verifies the 403 path runs even when the confirm token is
+        correct: an unauthorized caller with the right token should
+        still be blocked at the chat_id resolution step.
+        """
+        mock_request.headers = {"X-Webhook-Secret": "test-secret"}
+        mock_request.json = AsyncMock(return_value={"confirm": self._CONFIRM, "chat_id": 999})
+
+        with (
+            patch("kai.memory.is_enabled", return_value=True),
+            patch("kai.memory.delete_all") as mock_del,
+        ):
+            resp = await _handle_memory_delete_all(mock_request)
+
+        assert resp.status == 403
+        mock_del.assert_not_called()

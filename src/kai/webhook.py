@@ -26,6 +26,10 @@ Routes are organized into these groups:
     - /api/services/{name}  - External service proxy (injects auth from .env)
     - /api/send-message     - Send a text message to the Telegram chat
     - /api/send-file        - Send a file from the filesystem to the Telegram chat
+    - /api/memory/add       - Store a structured memory (POST)
+    - /api/memory/search    - Search memories by query (POST)
+    - /api/memory/stats     - Memory statistics for a user (GET)
+    - /api/memory/all       - Delete all memories for a user (DELETE, requires confirm token)
 
 The Telegram webhook route uses its own secret (TELEGRAM_WEBHOOK_SECRET) and is
 only registered in webhook mode. All other webhook/API endpoints require
@@ -45,13 +49,14 @@ import json
 import logging
 import re
 import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
 from telegram import Bot, Update
 
-from kai import cron, review, services, sessions, triage
+from kai import cron, memory, review, services, sessions, triage
 from kai.config import DATA_DIR, IMAGE_EXTENSIONS, Config, UserConfig
 from kai.telegram_utils import chunk_text
 
@@ -1443,6 +1448,397 @@ async def _handle_send_file(request: web.Request) -> web.Response:
     return web.json_response({"status": "sent", "file": path.name})
 
 
+# ── Memory API ───────────────────────────────────────────────────────
+# Four thin REST handlers wrapping memory.py primitives. Implementation
+# notes that apply uniformly across all four:
+#
+#   - All four share the symmetric `is_enabled()` precheck. Returns 503
+#     when memory is off, even on read endpoints whose primitives degrade
+#     gracefully (search returns [], get_stats returns zeroed). Returning
+#     the degraded value at the API would conflate "memory off" with
+#     "no data" and inner Claude could not pick a retry policy from the
+#     status code alone.
+#
+#   - Memory primitives take user_id as a string; _resolve_chat_id returns
+#     int. Stringify at the boundary in every handler. Removing the cast
+#     is a load-bearing bug: Mem0 keys are stored under the string form,
+#     so a missed cast would silently isolate the caller's memories from
+#     their existing facts.
+#
+#   - Handlers import memory as a module (`from kai import memory`) so
+#     tests can patch `kai.memory.<func>` uniformly. Function-level
+#     imports would force tests to patch the local binding
+#     (kai.webhook.add_structured), which is a known mocking pitfall.
+
+# Static well-known token for the DELETE /api/memory/all confirmation
+# field. Picked over a per-request UUID because the threat model is
+# typo-resistance and prompt-injection defense, not replay protection;
+# a static descriptive string is sufficient for both. The exact value
+# also appears in the 400 error body so a stray curl gets a clear hint
+# at what was missing.
+_DELETE_ALL_CONFIRM_TOKEN = "delete-all-memories"
+
+
+def _memory_disabled_response() -> web.Response:
+    """503 response used by the symmetric is_enabled() precheck.
+
+    Centralized so all four memory handlers return the identical body and
+    status. The 503 contract (vs the 500 used for `add_structured` failure
+    in /api/memory/add) is documented in IDENTITY.md: 503 means the
+    operator must enable memory, so callers should NOT retry; 500 means
+    the underlying store call failed and may be transient.
+    """
+    return web.json_response({"error": "Memory system disabled"}, status=503)
+
+
+@_require_secret
+async def _handle_memory_add(request: web.Request) -> web.Response:
+    """
+    Store a structured memory via memory.add_structured().
+
+    Wraps the existing add_structured() primitive used by the Haiku
+    extraction path. Lets inner Claude (and other localhost clients)
+    deliberately store facts without waiting for the extractor to pass
+    over a conversation. The primitive itself is unchanged; this handler
+    only adds the HTTP surface.
+
+    Request body (JSON):
+        content: str, required, non-empty after strip
+        memory_type: str, optional, default "fact"
+        tags: list[str], optional
+        metadata: dict, optional (keys "type" and "tags" are reserved by
+            add_structured; user values for those will be overwritten)
+        chat_id: int, optional, defaults to app["chat_id"]
+
+    Responses:
+        200 {"id": "<mem0-uuid>"} on success
+        400 on bad input (invalid JSON, missing/empty content, bad chat_id)
+        401 on bad/missing X-Webhook-Secret (handled by the decorator)
+        403 on unauthorized chat_id
+        503 when memory is disabled (precheck; do not retry, escalate)
+        500 when add_structured() returns None despite memory being enabled
+            (the underlying store call failed; may be transient)
+    """
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    # Required-field validation runs BEFORE the is_enabled() precheck so
+    # callers learn about bad-input bugs even when memory is off. Without
+    # this ordering, a caller debugging a missing-field bug while memory
+    # happens to be disabled would chase a 503 red herring instead of
+    # seeing the real 400.
+    #
+    # isinstance(...) guards before .strip() / iteration are deliberate.
+    # JSON delivers numbers, booleans, lists, nulls, and dicts; calling
+    # `.strip()` on a number raises AttributeError that escapes to
+    # aiohttp as a framework 500 with no clean error body. Same logic
+    # for the optional-field checks below: validate at the API boundary
+    # so the 400 surface stays the contract that callers actually see.
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return web.json_response({"error": "Missing required field: content"}, status=400)
+    content = content.strip()
+
+    # Two-step handling: collapse explicit None to the default first, then
+    # type-check. This makes `{"memory_type": null}` behave the same as
+    # omitting the field entirely (both fall back to "fact"), matching the
+    # lenient None handling used for `tags` and `metadata` below.
+    # `payload.get("memory_type", "fact")` alone would only apply the
+    # default when the key is ABSENT - an explicit null would slip through
+    # and fail isinstance, surprising callers who reasonably expect null
+    # and missing-key to be equivalent in JSON.
+    memory_type = payload.get("memory_type")
+    if memory_type is None:
+        memory_type = "fact"
+    if not isinstance(memory_type, str):
+        return web.json_response({"error": "memory_type must be a string"}, status=400)
+
+    tags = payload.get("tags")
+    if tags is not None and (not isinstance(tags, list) or not all(isinstance(t, str) for t in tags)):
+        return web.json_response({"error": "tags must be a list of strings"}, status=400)
+
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return web.json_response({"error": "metadata must be a JSON object"}, status=400)
+
+    try:
+        chat_id = _resolve_chat_id(request, payload)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except UnauthorizedChatIdError as e:
+        return web.json_response({"error": str(e)}, status=403)
+
+    # Symmetric is_enabled() precheck. Runs after auth + 400-level
+    # validation but before the primitive call. See the §Memory API
+    # block comment above for why all four memory handlers share this.
+    if not memory.is_enabled():
+        return _memory_disabled_response()
+
+    # int -> str at the memory boundary; do NOT remove the cast.
+    user_id = str(chat_id)
+
+    # Defense-in-depth guard, matching the pattern used in the other
+    # three memory handlers. add_structured catches its own internal
+    # exceptions and returns None (which the None-check below maps to
+    # 500), but if the call raises BEFORE reaching that internal try
+    # (init failure, bad argument shape, network error during connection
+    # setup), the exception would otherwise escape to aiohttp as an HTML
+    # 500. The wider guard collapses both failure modes into the same
+    # clean 500 JSON body.
+    try:
+        memory_id = memory.add_structured(
+            content,
+            user_id=user_id,
+            memory_type=memory_type,
+            tags=tags,
+            metadata=metadata,
+        )
+    except Exception:
+        log.exception("memory.add_structured failed for chat %d", chat_id)
+        return web.json_response({"error": "Memory storage failed"}, status=500)
+
+    if memory_id is None:
+        # Reaching here means is_enabled() was True at precheck (so we
+        # know memory was up) and add_structured did not raise, but it
+        # returned None anyway. The only remaining None path inside
+        # add_structured (after the empty-content path which we filtered
+        # above with the 400 check) is the caught Exception around
+        # _memory.add(). Same 500 response body as the wider guard above
+        # because callers cannot meaningfully distinguish "primitive
+        # raised" from "primitive caught and returned None" - both are
+        # transient store failures.
+        return web.json_response({"error": "Memory storage failed"}, status=500)
+
+    log.info("Stored memory %s for chat %d via API", memory_id, chat_id)
+    return web.json_response({"id": memory_id})
+
+
+@_require_secret
+async def _handle_memory_search(request: web.Request) -> web.Response:
+    """
+    Search memories via memory.search().
+
+    POST chosen over GET because user-message-shaped queries can be long
+    enough to bump against URL-length limits on some HTTP clients, and
+    POST also matches the rest of the /api/* surface (POST except
+    /api/jobs* GET).
+
+    Request body (JSON):
+        query: str, required, non-empty after strip
+        limit: int, optional (defaults to config.memory_search_limit)
+        chat_id: int, optional, defaults to app["chat_id"]
+
+    Responses:
+        200 {"results": [<MemoryResult-dict>, ...]} on success (empty list
+            is a valid 200 result for "no matches")
+        400 on bad input
+        401 on bad secret
+        403 on unauthorized chat_id
+        503 when memory is disabled
+    """
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    # Same isinstance-before-.strip() rationale as _handle_memory_add:
+    # a non-string `query` from JSON would raise AttributeError on .strip()
+    # and escape to aiohttp.
+    query = payload.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return web.json_response({"error": "Missing required field: query"}, status=400)
+    query = query.strip()
+
+    # Optional `limit`: must be a positive int when provided. The
+    # `isinstance(limit, bool)` short-circuit is load-bearing because
+    # bool is a subclass of int in Python (`isinstance(True, int)` is
+    # True), so without the bool check `{"limit": true}` would be
+    # accepted as `limit=1` and silently truncate results to one row.
+    limit = payload.get("limit")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        return web.json_response({"error": "limit must be a positive integer"}, status=400)
+
+    try:
+        chat_id = _resolve_chat_id(request, payload)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except UnauthorizedChatIdError as e:
+        return web.json_response({"error": str(e)}, status=403)
+
+    # search() degrades to [] when memory is disabled, but returning []
+    # at the API layer would be indistinguishable from "no matches".
+    # Inner Claude needs to pick "log no relevant memories and continue"
+    # vs "memory is off, surface to operator" - the only distinguishing
+    # signal is the status code, so the precheck is required.
+    if not memory.is_enabled():
+        return _memory_disabled_response()
+
+    user_id = str(chat_id)
+
+    # Defense-in-depth around the full risky path: primitive call AND
+    # serialization. search() catches its own exceptions and returns []
+    # today, and asdict() should always succeed on the frozen dataclass
+    # MemoryResult, but extending the guard to cover the asdict+
+    # json_response step keeps the 500-as-clean-JSON contract intact
+    # even if a future refactor changes search()'s return type or if
+    # MemoryResult.metadata ever contains non-JSON-native values.
+    # Without the wider guard, asdict raising TypeError or json_response
+    # raising ValueError would escape to aiohttp as an unstyled HTML 500.
+    try:
+        results = memory.search(query, user_id=user_id, limit=limit)
+        # asdict() flattens each frozen dataclass to a plain dict. Every
+        # value inside MemoryResult.metadata is JSON-native because Mem0
+        # stores metadata in Qdrant as JSON, so json_response can
+        # serialize the whole structure without a custom encoder.
+        return web.json_response({"results": [asdict(r) for r in results]})
+    except Exception:
+        log.exception("memory.search failed for chat %d", chat_id)
+        return web.json_response({"error": "Memory search failed"}, status=500)
+
+
+@_require_secret
+async def _handle_memory_stats(request: web.Request) -> web.Response:
+    """
+    Return memory statistics via memory.get_stats().
+
+    GET endpoint reads chat_id from query params, mirroring _handle_get_jobs.
+
+    Query params:
+        chat_id: int, optional (defaults to app["chat_id"])
+
+    Response is the MemoryStats object at the top level, NOT wrapped in
+    {"results": ...} - single-object reads return the object bare per
+    the API's response-shape rule (matches /api/jobs/{id} returning
+    `job` at top level).
+
+    Note on null fields: confidence_min, confidence_median, confidence_max
+    are JSON null when extracted_count == 0. This is correct for users
+    with no extracted facts and is NOT a store-failure signal. Callers
+    should treat null in those fields as "no data to summarize."
+
+    Responses:
+        200 <MemoryStats-dict> on success
+        400 on bad chat_id
+        401 on bad secret
+        403 on unauthorized chat_id
+        503 when memory is disabled
+    """
+    # GET handlers feed query params to _resolve_chat_id; established
+    # pattern at _handle_get_jobs.
+    try:
+        chat_id = _resolve_chat_id(request, dict(request.query))
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except UnauthorizedChatIdError as e:
+        return web.json_response({"error": str(e)}, status=403)
+
+    # get_stats() returns zeroed MemoryStats when memory is disabled,
+    # but - same as search - "memory off" and "user has no facts yet"
+    # would be indistinguishable at the API. The 503 precheck preserves
+    # the distinction at the status-code layer.
+    if not memory.is_enabled():
+        return _memory_disabled_response()
+
+    user_id = str(chat_id)
+
+    # Wider guard around primitive call AND serialization, matching the
+    # search handler. get_stats() doesn't have its own try/except today
+    # (aggregation errors on a malformed row could surface here), and
+    # extending the guard to the asdict+json_response step closes the
+    # remaining route by which an exception could escape to aiohttp as
+    # an HTML 500.
+    try:
+        stats = memory.get_stats(user_id=user_id)
+        # asdict() preserves None for the optional confidence_* fields,
+        # which become JSON null on the wire. The IDENTITY.md
+        # "Memory System" section documents this so inner Claude does
+        # not misread null as a store failure.
+        return web.json_response(asdict(stats))
+    except Exception:
+        log.exception("memory.get_stats failed for chat %d", chat_id)
+        return web.json_response({"error": "Memory stats failed"}, status=500)
+
+
+@_require_secret
+async def _handle_memory_delete_all(request: web.Request) -> web.Response:
+    """
+    Delete all memories for a user via memory.delete_all().
+
+    Requires an exact-match confirm token in the body. Static
+    well-known token (not per-request UUID) because the threat model
+    is typo + prompt-injection defense, not replay protection.
+
+    Convention divergence (deliberate): _handle_delete_job reads chat_id
+    from query params, but this handler reads chat_id from the body
+    alongside the confirm token, since the body already exists for the
+    confirm field. Splitting confirm into the body and chat_id into the
+    query would be inconsistent within the same endpoint.
+
+    Request body (JSON):
+        confirm: str, required, must equal "delete-all-memories"
+        chat_id: int, optional, defaults to app["chat_id"]
+
+    Responses:
+        200 {"status": "deleted"} on success
+        400 on missing/wrong confirm or bad chat_id
+        401 on bad secret
+        403 on unauthorized chat_id
+        503 when memory is disabled
+
+    Caveat: delete_all() swallows internal errors (memory.py:1066-1069).
+    Partial failures inside Mem0 are logged but invisible at the API
+    layer. Surfacing them would require widening memory.py's error
+    contract, which is out of scope for the foundation issue.
+    """
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    # Confirm-token check before chat_id resolution: a request with the
+    # wrong token is structurally bad input regardless of which user it
+    # was aimed at, and rejecting it first means we don't waste a
+    # _resolve_chat_id call on requests we will reject anyway.
+    if payload.get("confirm") != _DELETE_ALL_CONFIRM_TOKEN:
+        return web.json_response(
+            {"error": f'Missing or incorrect confirm field; expected "{_DELETE_ALL_CONFIRM_TOKEN}"'},
+            status=400,
+        )
+
+    try:
+        chat_id = _resolve_chat_id(request, payload)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except UnauthorizedChatIdError as e:
+        return web.json_response({"error": str(e)}, status=403)
+
+    # Symmetric precheck. delete_all() is a no-op when disabled, but
+    # callers asking the API to wipe their memories deserve to know the
+    # operation didn't actually run because the system was off.
+    if not memory.is_enabled():
+        return _memory_disabled_response()
+
+    user_id = str(chat_id)
+    # Defense-in-depth guard, matching the pattern used in
+    # _handle_memory_search and _handle_memory_stats. delete_all()
+    # catches its own internal errors today (memory.py:1066-1069), so
+    # this try/except mostly never fires - but if a future refactor
+    # ever lets an exception escape (or if the call raises before
+    # reaching the inner try, e.g. on a TypeError from a bad argument
+    # shape), the handler still returns a clean 500 JSON body instead
+    # of an aiohttp HTML 500 page.
+    try:
+        memory.delete_all(user_id=user_id)
+    except Exception:
+        log.exception("memory.delete_all failed for chat %d", chat_id)
+        return web.json_response({"error": "Memory delete failed"}, status=500)
+
+    log.info("Deleted all memories for chat %d via API", chat_id)
+    return web.json_response({"status": "deleted"})
+
+
 # ── Webhook health monitor ───────────────────────────────────────────
 
 
@@ -1676,6 +2072,10 @@ async def start(telegram_app, config) -> None:
         _app.router.add_post("/api/services/{name}", _handle_service_call)
         _app.router.add_post("/api/send-message", _handle_send_message)
         _app.router.add_post("/api/send-file", _handle_send_file)
+        _app.router.add_post("/api/memory/add", _handle_memory_add)
+        _app.router.add_post("/api/memory/search", _handle_memory_search)
+        _app.router.add_get("/api/memory/stats", _handle_memory_stats)
+        _app.router.add_delete("/api/memory/all", _handle_memory_delete_all)
     else:
         log.warning("WEBHOOK_SECRET not set - webhook and scheduling endpoints disabled")
 

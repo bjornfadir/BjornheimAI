@@ -40,6 +40,7 @@ from pathlib import Path
 import yaml
 
 from kai.config import (
+    EFFORT_LEVELS,
     MAX_CONTEXT_CEILING,
     OPEN_ENDED_PROVIDERS,
     PROJECT_ROOT,
@@ -557,6 +558,26 @@ def _cmd_config() -> None:
         print("  Must be 0-100.")
     print()
 
+    # CLAUDE_EFFORT_LEVEL is a truly-global setting (single value applies
+    # to every chat's inner Claude subprocess), so the prompt sits OUT-
+    # SIDE the per-user-vs-global if/else above and runs unconditionally.
+    # This matches the autocompact_pct precedent immediately above.
+    # _prompt_choice enforces the allow-list at wizard time, mirroring
+    # the runtime allow-list check in config._VALID_EFFORT_LEVELS so the
+    # operator cannot persist an invalid value to install.conf and have
+    # it fail later at service startup.
+    # Use the canonical EFFORT_LEVELS tuple from config so the wizard
+    # prompt and the runtime allow-list cannot drift out of sync. Cast
+    # to list because _prompt_choice expects a list (it joins with "/"
+    # for the display string and uses `in` for membership; tuple would
+    # work for both but the type signature asks for list).
+    claude_effort_level = _prompt_choice(
+        "Inner Claude effort level",
+        list(EFFORT_LEVELS),
+        existing_env.get("CLAUDE_EFFORT_LEVEL", "high"),
+    )
+    print()
+
     # -- Webhook server --
     print("-- Webhook server --")
     while True:
@@ -856,6 +877,16 @@ def _cmd_config() -> None:
         env["CLAUDE_MAX_CONTEXT_WINDOW"] = max_context_window
     if int(autocompact_pct) != 0:
         env["CLAUDE_AUTOCOMPACT_PCT"] = autocompact_pct
+
+    # CLAUDE_EFFORT_LEVEL is global (not per-user), so it is considered
+    # regardless of users.yaml. Only emit when the operator picked a
+    # non-default value to keep install.conf as a delta from defaults
+    # rather than a snapshot of every available knob - matches the
+    # autocompact_pct treatment immediately above. The wizard's
+    # _prompt_choice already validated the value against the same
+    # allow-list config.py uses, so no re-validation here.
+    if claude_effort_level != "high":
+        env["CLAUDE_EFFORT_LEVEL"] = claude_effort_level
 
     # Conditionally add optional values
     if transport == "webhook":

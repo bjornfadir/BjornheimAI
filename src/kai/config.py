@@ -118,6 +118,25 @@ def get_effective_provider(backend: str, llm_provider: str) -> str:
     return llm_provider
 
 
+# Valid values for the inner Claude --effort flag, taken verbatim from
+# `claude --help` output. If Anthropic adds a new tier (e.g. "ultra"),
+# update EFFORT_LEVELS here or otherwise-valid configs will be rejected
+# at config-load time. Two shapes intentionally:
+#   - EFFORT_LEVELS (ordered tuple): operator-facing surface. Used in
+#     error messages and wizard prompts so the listing reads as an
+#     intensity progression (low -> max) rather than alphabetical
+#     ('high','low','max','medium','xhigh'), which is what sorted()
+#     on the frozenset would produce and would confuse an operator.
+#   - _VALID_EFFORT_LEVELS (derived frozenset): internal membership
+#     check, O(1). Derived from EFFORT_LEVELS so the two cannot drift.
+# Validation against the frozenset keeps an invalid CLAUDE_EFFORT_LEVEL
+# from reaching the inner-Claude subprocess: a bad value would otherwise
+# cost a full session to discover (the subprocess would fail at startup,
+# not at config load).
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+_VALID_EFFORT_LEVELS: frozenset[str] = frozenset(EFFORT_LEVELS)
+
+
 def validate_model_for_provider(model: str, provider: str) -> bool:
     """Check if a model is valid for a provider.
 
@@ -341,6 +360,20 @@ class Config:
     # 0 = use Claude Code defaults (1M window, ~83% autocompact threshold).
     claude_max_context_window: int = 0  # tokens; passed as --max-context-window CLI flag
     claude_autocompact_pct: int = 0  # 1-100; passed as CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env var
+
+    # Effort level passed to inner Claude as `--effort <value>`. Higher
+    # settings spend more reasoning tokens per turn, improving answer
+    # quality at the cost of latency and budget. Default "high" matches
+    # the operator's outer-Claude default; switching to "medium" globally
+    # would silently downgrade existing reasoning quality. Critical when
+    # CLAUDE_USER / users.yaml `os_user` is set, because inner Claude
+    # then runs as a different OS user and does NOT inherit the outer
+    # operator's settings.json effort default - without this CLI value,
+    # user-isolated installs would silently fall to whatever the claude
+    # binary picks as its own default. Validated at config load against
+    # _VALID_EFFORT_LEVELS so a typo fails fast rather than at the
+    # subprocess startup of the next chat session.
+    claude_effort_level: str = "high"
 
     # Database - uses DATA_DIR so the db lands in the writable data directory
     session_db_path: Path = field(default_factory=lambda: DATA_DIR / "kai.db")
@@ -1323,6 +1356,25 @@ def load_config() -> Config:
     except ValueError:
         raise SystemExit("CLAUDE_AUTOCOMPACT_PCT must be an integer") from None
 
+    # CLAUDE_EFFORT_LEVEL: validated against the documented `claude --help`
+    # allow-list (_VALID_EFFORT_LEVELS at module top). Lowercase + strip so
+    # "HIGH " or " medium" copy-pasted from docs do not become silent
+    # operator footguns. Empty string / unset both fall back to the
+    # dataclass default ("high") via the `or "high"` short-circuit on the
+    # stripped value. Parsing is a simple membership check rather than the
+    # surrounding numeric blocks' try/except ValueError pattern, because
+    # str.strip().lower() cannot raise; the membership check is the only
+    # way to fail. SystemExit on bad input mirrors how the surrounding
+    # CLAUDE_* parsing blocks signal config-load failure, keeping the
+    # operator-visible behavior consistent across the cluster.
+    claude_effort_level = os.environ.get("CLAUDE_EFFORT_LEVEL", "high").strip().lower() or "high"
+    if claude_effort_level not in _VALID_EFFORT_LEVELS:
+        # Use the ordered tuple, not sorted(_VALID_EFFORT_LEVELS) - the
+        # latter would print alphabetically ('high','low','max','medium',
+        # 'xhigh'), which mangles the intensity progression an operator
+        # expects to see in an error string.
+        raise SystemExit(f"CLAUDE_EFFORT_LEVEL must be one of {list(EFFORT_LEVELS)}, got {claude_effort_level!r}")
+
     # PR review agent config
     pr_review_enabled = os.environ.get("PR_REVIEW_ENABLED", "").lower() in ("1", "true", "yes")
     try:
@@ -1582,6 +1634,7 @@ def load_config() -> Config:
         claude_idle_timeout=claude_idle_timeout,
         claude_max_context_window=claude_max_context_window,
         claude_autocompact_pct=claude_autocompact_pct,
+        claude_effort_level=claude_effort_level,
         webhook_port=webhook_port,
         webhook_secret=os.environ.get("WEBHOOK_SECRET", ""),
         voice_enabled=os.environ.get("VOICE_ENABLED", "").lower() in ("1", "true", "yes"),

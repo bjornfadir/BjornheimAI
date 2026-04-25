@@ -507,6 +507,41 @@ class Config:
     # per-call cost.
     memory_consolidation_candidates_n: int = 8
 
+    # Stage-2 episode generation (issue #385). Conditional second extractor
+    # that runs out-of-band on stage-1 positives (has_episode=true) to
+    # produce one Sophia-shaped episode record per episode-worthy turn.
+    # Honors memory_enabled; no dedicated kill switch.
+    #
+    # memory_episode_model: empty string is the sentinel for "inherit
+    # memory_extraction_model" - load_config() applies the inheritance
+    # at startup, so an operator who only sets MEMORY_EXTRACTION_MODEL
+    # gets both stages on the new model. The literal stays empty here
+    # rather than a model name so a reader who greps for "what is the
+    # default model" is not misled: in production the dataclass literal
+    # is never the effective value. Test fixtures that construct Config
+    # directly should set this explicitly to a real model name.
+    memory_episode_model: str = ""
+    # Per-call budget ceiling (USD). Default 0.15 is sized for a
+    # Sonnet-class model on the FULL uncapped (user, assistant) pair;
+    # stage 2 deliberately bypasses stage-1's 500-char assistant cap.
+    # Sonnet is the recommended stage-2 model because it produces
+    # materially better narratives across the 7-8 Sophia episode
+    # fields, and stage 2 is fully out-of-band (latency invisible to
+    # the user). Operators on a Max-plan OAuth subscription do not
+    # bill per-token for headless `claude --print`, so this ceiling
+    # is a safety rail rather than a real cost gate. Operators
+    # downgrading memory_episode_model to Haiku can drop this to
+    # 0.05 or lower; the wizard recommends 0.15 as the default.
+    memory_episode_budget_usd: float = 0.15
+    # Subprocess timeout (seconds). Default 120 - twice the production-
+    # tuned stage-1 value (60s) and 12x the stage-1 dataclass default
+    # (10s). The asymmetry is intentional: stage 2 is fire-and-forget
+    # off the user-facing turn, so a long-tailed timeout only delays
+    # storage, never the user's reply. Floor of 10s prevents accidental
+    # sub-Haiku-warm-up timeouts that would mask real model failure as
+    # configuration error.
+    memory_episode_timeout_s: int = 120
+
     # Minimum Mem0 similarity score for a memory to be returned by
     # search-driven paths: both `format_context` (context injection
     # at session start) and the `/memory search` UI surface in
@@ -1494,6 +1529,28 @@ def load_config() -> Config:
     except ValueError:
         raise SystemExit("MEMORY_CONSOLIDATION_CANDIDATES_N must be an integer") from None
 
+    # Stage-2 episode generation (issue #385). Same try/except pattern as
+    # the other memory_* numeric vars. Model defaults to whatever was
+    # loaded for memory_extraction_model so an operator who changed only
+    # MEMORY_EXTRACTION_MODEL also moves stage 2 onto the new model;
+    # explicit MEMORY_EPISODE_MODEL takes precedence. Budget is strictly
+    # positive (zero would silently disable a real subprocess; the
+    # intentional kill switch is MEMORY_ENABLED). Timeout floor is 10s
+    # to prevent accidentally tightening it below Haiku's warm-up time.
+    memory_episode_model = os.environ.get("MEMORY_EPISODE_MODEL", "").strip() or memory_extraction_model
+    try:
+        memory_episode_budget_usd = float(os.environ.get("MEMORY_EPISODE_BUDGET_USD", "0.15"))
+        if memory_episode_budget_usd <= 0:
+            raise SystemExit("MEMORY_EPISODE_BUDGET_USD must be positive")
+    except ValueError:
+        raise SystemExit("MEMORY_EPISODE_BUDGET_USD must be a number") from None
+    try:
+        memory_episode_timeout_s = int(os.environ.get("MEMORY_EPISODE_TIMEOUT_S", "120"))
+        if memory_episode_timeout_s < 10:
+            raise SystemExit("MEMORY_EPISODE_TIMEOUT_S must be at least 10")
+    except ValueError:
+        raise SystemExit("MEMORY_EPISODE_TIMEOUT_S must be an integer") from None
+
     # Search relevance floor. Float in [0.0, 1.0]; default 0.3 matches
     # Mem0's built-in default and the prior hard-coded constant. Same
     # try/except pattern as the other memory_* numeric vars: bad input
@@ -1668,5 +1725,8 @@ def load_config() -> Config:
         memory_extraction_budget_usd=memory_extraction_budget_usd,
         memory_extraction_timeout_s=memory_extraction_timeout_s,
         memory_consolidation_candidates_n=memory_consolidation_candidates_n,
+        memory_episode_model=memory_episode_model,
+        memory_episode_budget_usd=memory_episode_budget_usd,
+        memory_episode_timeout_s=memory_episode_timeout_s,
         memory_search_floor=memory_search_floor,
     )

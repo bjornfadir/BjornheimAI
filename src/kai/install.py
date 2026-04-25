@@ -772,6 +772,19 @@ def _cmd_config() -> None:
     memory_extraction_budget_usd = "0.01"
     memory_extraction_timeout_s = "10"
     memory_consolidation_candidates_n = "8"
+    # Stage-2 episode generation defaults (issue #385). Each pre-init
+    # value matches the corresponding wizard prompt default and the
+    # emission-gate sentinel so the data flow reads consistently
+    # whether the operator runs the episode block or skips it.
+    # Model is the exception by design: empty string here means
+    # "inherit memory_extraction_model" via load_config, while the
+    # wizard separately recommends Sonnet to operators who reach the
+    # prompt - they're different defaults for different audiences
+    # (test fixtures and skipped-wizard installs vs operators
+    # actively configuring).
+    memory_episode_model = ""
+    memory_episode_budget_usd = "0.15"
+    memory_episode_timeout_s = "120"
     memory_token_budget = "2000"
     memory_search_limit = "10"
     if memory_enabled:
@@ -823,6 +836,57 @@ def _cmd_config() -> None:
                     if _validate_non_negative_int(memory_consolidation_candidates_n):
                         break
                     print("  Must be a non-negative integer (0 to disable consolidation).")
+                # Stage-2 episode generation tunables (issue #385). All
+                # three sit inside the extraction-enabled guard because
+                # episodes only fire when stage 1 fires (the has_episode
+                # classifier comes from stage 1's output). Operators
+                # who disable extraction also disable episodes; those
+                # tunables would otherwise be wizard noise.
+                #
+                # Wizard recommends Sonnet for stage 2 even though the
+                # config dataclass default falls back to the extraction
+                # model (Haiku). Reasoning: stage 2 runs out-of-band so
+                # latency does not reach the user, and on a Max-plan
+                # OAuth subscription headless `claude --print` calls do
+                # not bill per-token, so the only reason to keep Haiku
+                # for stage 2 was historical (cost-asymmetry framing
+                # that does not apply to Kai's deployment shape).
+                # Narrative quality across the 7-8 Sophia episode
+                # fields is exactly the regime where Sonnet pulls ahead
+                # of Haiku, so the default the operator sees should
+                # reflect that. The dataclass default stays at "" so
+                # the inheritance fallback continues to work for tests
+                # and for operators who explicitly want to track
+                # whatever extraction model is set.
+                memory_episode_model = _prompt(
+                    "Episode generator model (Sonnet recommended for narrative quality)",
+                    existing_env.get("MEMORY_EPISODE_MODEL", "claude-sonnet-4-6"),
+                )
+                while True:
+                    memory_episode_budget_usd = _prompt(
+                        "Per-episode USD budget (0.15 for Sonnet, 0.05 for Haiku)",
+                        existing_env.get("MEMORY_EPISODE_BUDGET_USD", "0.15"),
+                    )
+                    if _validate_positive_float(memory_episode_budget_usd):
+                        break
+                    print("  Must be a positive number.")
+                # Episode timeout has a 10s floor: Haiku's warm-up alone
+                # routinely runs several seconds, so a sub-floor timeout
+                # would surface as systematic timeouts that mask real
+                # model failure as configuration error. Inline check
+                # rather than a dedicated validator helper because this
+                # is the only call site with a per-field minimum.
+                while True:
+                    memory_episode_timeout_s = _prompt(
+                        "Per-episode timeout in seconds (minimum 10)",
+                        existing_env.get("MEMORY_EPISODE_TIMEOUT_S", "120"),
+                    )
+                    try:
+                        if int(memory_episode_timeout_s) >= 10:
+                            break
+                    except ValueError:
+                        pass
+                    print("  Must be an integer of at least 10.")
         while True:
             memory_token_budget = _prompt(
                 "Memory context token budget per turn",
@@ -975,6 +1039,18 @@ def _cmd_config() -> None:
             # dataclass default.
             if int(memory_consolidation_candidates_n) != 8:
                 env["MEMORY_CONSOLIDATION_CANDIDATES_N"] = memory_consolidation_candidates_n
+            # Stage-2 episode tunables (issue #385). Same delta-from-default
+            # discipline as the stage-1 keys above. Episode model is
+            # written ONLY when the operator entered a non-blank value -
+            # blank means "inherit memory_extraction_model" and load_config
+            # implements the inheritance, so we deliberately leave the
+            # key out so the inheritance path stays intact across reinstall.
+            if memory_episode_model.strip():
+                env["MEMORY_EPISODE_MODEL"] = memory_episode_model.strip()
+            if float(memory_episode_budget_usd) != 0.15:
+                env["MEMORY_EPISODE_BUDGET_USD"] = memory_episode_budget_usd
+            if int(memory_episode_timeout_s) != 120:
+                env["MEMORY_EPISODE_TIMEOUT_S"] = memory_episode_timeout_s
         if int(memory_token_budget) != 2000:
             env["MEMORY_TOKEN_BUDGET"] = memory_token_budget
         # Search limit applies to retrieval (read path), not extraction
@@ -994,6 +1070,13 @@ def _cmd_config() -> None:
         env.pop("MEMORY_EXTRACTION_BUDGET_USD", None)
         env.pop("MEMORY_EXTRACTION_TIMEOUT_S", None)
         env.pop("MEMORY_CONSOLIDATION_CANDIDATES_N", None)
+        # Episode keys follow the same lifecycle: stage 2 only fires
+        # when stage 1 fires, and stage 1 silently skips on non-claude
+        # backends. Leaving these in the env file would mislead an
+        # operator who flips backend from claude to goose.
+        env.pop("MEMORY_EPISODE_MODEL", None)
+        env.pop("MEMORY_EPISODE_BUDGET_USD", None)
+        env.pop("MEMORY_EPISODE_TIMEOUT_S", None)
 
     # Build and write install.conf
     conf = {

@@ -1420,13 +1420,20 @@ class TestCmdConfig:
         monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
         self._block_etc_kai(monkeypatch)
 
-        # Memory on, extraction on, custom budget + timeout + consolidation candidates + token budget + search limit.
+        # Memory on, extraction on, custom budget + timeout + consolidation candidates + episode tunables + token budget + search limit.
         memory_block = [
             "true",  # memory enabled
             "true",  # extraction enabled (claude backend)
             "0.05",  # extraction budget USD
             "60",  # extraction timeout seconds (#345)
             "5",  # consolidation candidates (non-default, exercises emission branch)
+            # Episode model: empty input now resolves to the wizard's
+            # default of "claude-sonnet-4-6" rather than the empty
+            # string. To exercise the explicit-override emission
+            # branch, type a different model literal here.
+            "claude-haiku-4-5-20251001",  # episode model (explicit override)
+            "0.07",  # episode budget USD (non-default; exercises emission branch)
+            "60",  # episode timeout seconds (non-default)
             "3000",  # token budget
             "20",  # search limit (#345)
         ]
@@ -1442,8 +1449,64 @@ class TestCmdConfig:
         assert env["MEMORY_EXTRACTION_BUDGET_USD"] == "0.05"
         assert env["MEMORY_EXTRACTION_TIMEOUT_S"] == "60"
         assert env["MEMORY_CONSOLIDATION_CANDIDATES_N"] == "5"
+        # Episode model: the wizard's non-blank default means an
+        # operator who hits Enter at the prompt now gets Sonnet
+        # written to the env. This test asserts the explicit-override
+        # path: a model literal typed in the prompt survives to env.
+        assert env["MEMORY_EPISODE_MODEL"] == "claude-haiku-4-5-20251001"
+        assert env["MEMORY_EPISODE_BUDGET_USD"] == "0.07"
+        assert env["MEMORY_EPISODE_TIMEOUT_S"] == "60"
         assert env["MEMORY_TOKEN_BUDGET"] == "3000"
         assert env["MEMORY_SEARCH_LIMIT"] == "20"
+
+    def test_memory_episode_wizard_default_writes_sonnet(self, tmp_path, monkeypatch):
+        """Regression for the v1 default-flip: an operator who accepts
+        every wizard default in the episode block should end up with
+        MEMORY_EPISODE_MODEL=claude-sonnet-4-6 written to env, not the
+        empty-inheritance fallback. Pins the recommendation contract so
+        a future "default back to inheritance" change surfaces here.
+
+        Budget default is 0.15 (matches the dataclass default), so the
+        emission gate suppresses the key - asserted absent. Timeout
+        default is 120, also suppressed."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # Every input below matches the corresponding dataclass
+        # default so the emission gates suppress non-episode keys.
+        # Asserted on the negative side below for the episode keys;
+        # the positive assertion is on the Sonnet model entry.
+        memory_block = [
+            "true",  # memory enabled
+            "true",  # extraction enabled
+            "0.01",  # extraction budget (stage-1 dataclass default; suppressed)
+            "10",  # extraction timeout (dataclass default; suppressed)
+            "8",  # consolidation candidates (dataclass default; suppressed)
+            "",  # episode model: accept wizard default = claude-sonnet-4-6
+            "0.15",  # episode budget (dataclass default; suppressed)
+            "120",  # episode timeout (dataclass default; suppressed)
+            "2000",  # token budget (dataclass default; suppressed)
+            "10",  # search limit (dataclass default; suppressed)
+        ]
+        inputs = iter(self._base_inputs(memory_block))
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        # Sonnet is the recommended default, so empty input → Sonnet.
+        assert env["MEMORY_EPISODE_MODEL"] == "claude-sonnet-4-6"
+        # Budget and timeout match dataclass defaults → no emission.
+        assert "MEMORY_EPISODE_BUDGET_USD" not in env
+        assert "MEMORY_EPISODE_TIMEOUT_S" not in env
+        # Stage-1 keys also suppressed because their inputs match
+        # the dataclass defaults too. Assert the suppression so a
+        # future change to the gate semantics surfaces here.
+        assert "MEMORY_EXTRACTION_BUDGET_USD" not in env
+        assert "MEMORY_EXTRACTION_TIMEOUT_S" not in env
+        assert "MEMORY_CONSOLIDATION_CANDIDATES_N" not in env
 
     def test_memory_round_trip_through_env_file(self, tmp_path, monkeypatch):
         """Wizard-captured memory vars survive _generate_env_file()."""
@@ -1452,8 +1515,19 @@ class TestCmdConfig:
         monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
         self._block_etc_kai(monkeypatch)
 
-        # Inputs in wizard order: enabled, ext enabled, budget, timeout, consolidation, token budget, search limit.
-        memory_block = ["true", "true", "0.07", "45", "4", "2500", "15"]
+        # Inputs in wizard order: enabled, ext enabled, budget, timeout, consolidation, episode model/budget/timeout, token budget, search limit.
+        memory_block = [
+            "true",
+            "true",
+            "0.07",
+            "45",
+            "4",
+            "claude-haiku-4-5-future",
+            "0.10",
+            "90",
+            "2500",
+            "15",
+        ]
         inputs = iter(self._base_inputs(memory_block))
         monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
 
@@ -1466,6 +1540,12 @@ class TestCmdConfig:
         assert 'MEMORY_EXTRACTION_BUDGET_USD="0.07"' in rendered
         assert 'MEMORY_EXTRACTION_TIMEOUT_S="45"' in rendered
         assert 'MEMORY_CONSOLIDATION_CANDIDATES_N="4"' in rendered
+        # Episode tunables: explicit model entry survives, non-default
+        # budget and timeout survive. Round-trip parity with the
+        # extraction tunables above.
+        assert 'MEMORY_EPISODE_MODEL="claude-haiku-4-5-future"' in rendered
+        assert 'MEMORY_EPISODE_BUDGET_USD="0.10"' in rendered
+        assert 'MEMORY_EPISODE_TIMEOUT_S="90"' in rendered
         assert 'MEMORY_TOKEN_BUDGET="2500"' in rendered
         assert 'MEMORY_SEARCH_LIMIT="15"' in rendered
 

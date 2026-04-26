@@ -2645,7 +2645,21 @@ class TestHandleResponse:
 
     @pytest.mark.asyncio
     async def test_error_response_with_live_msg(self):
-        """success=False with existing live message: edits error into live message."""
+        """success=False with existing live message: error appears as
+        a NEW follow-up reply via _reply_safe (not edited into the
+        live message via _edit_message_safe). The live streamed
+        content stays visible so any tool-use, partial reasoning, and
+        intermediate output the user was watching survives the error.
+
+        Patches kai.bot._reply_safe directly rather than relying on
+        its internal call to reply_text - the latter would couple
+        this assertion to _reply_safe's implementation, and a future
+        refactor of _reply_safe (e.g., to use a different telegram
+        method on its first attempt) would silently void this
+        assertion. The streaming loop also uses _reply_safe to
+        create live_msg, so we filter the captured calls to those
+        carrying an "Error" prefix to isolate the error-path
+        invocations from the streaming-text invocations."""
         from kai.bot import _handle_response
 
         update = _make_update()
@@ -2662,12 +2676,34 @@ class TestHandleResponse:
         )
         ctx = _make_context(claude=claude)
 
-        with patch.multiple("kai.bot", **self._base_patches()):
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply_safe,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit_safe,
+        ):
             await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
 
-        # Error should be edited into the live message
-        last_edit = live_msg.edit_text.call_args_list[-1]
-        assert "Error" in last_edit[0][0]
+        # The error path uses _reply_safe (NOT _edit_message_safe) -
+        # error appears as a follow-up message, not an in-place edit.
+        # Pinning the negative property because the absence of an
+        # edit is the load-bearing contract change. Length guard on
+        # args[1] mirrors the pattern used in test_error_recovery.py
+        # so a future _reply_safe call site that omits the text arg
+        # produces a meaningful assertion failure rather than
+        # IndexError.
+        for call in mock_edit_safe.await_args_list:
+            text_arg = call.args[1] if len(call.args) > 1 else ""
+            assert "Error" not in text_arg, (
+                f"_edit_message_safe was called with an error string ({text_arg!r}), "
+                f"violating the append-not-overwrite contract"
+            )
+        error_calls = [
+            call
+            for call in mock_reply_safe.await_args_list
+            if (call.args[1] if len(call.args) > 1 else "").startswith("Error")
+        ]
+        assert len(error_calls) >= 1, "expected the error to appear via _reply_safe"
+        assert "Something broke" in error_calls[-1].args[1]
 
     @pytest.mark.asyncio
     async def test_error_response_no_live_msg(self):

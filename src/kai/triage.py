@@ -45,7 +45,13 @@ log = logging.getLogger(__name__)
 # no need for Opus tokens. Sonnet handles classification and analysis well.
 _TRIAGE_MODEL = "sonnet"
 
-# Per-triage budget cap in USD.
+# Per-triage budget cap in USD. Vestigial after #390: --max-budget-usd
+# is no longer emitted to claude --print argv on the claude branch
+# (Max-plan OAuth makes the CLI's computed-cost ceiling a phantom
+# signal), and the Goose branch uses --max-turns 1 rather than a
+# dollar ceiling, so this constant has no consumer at present.
+# Retained for symmetry with _REVIEW_BUDGET_USD and for future
+# non-claude triage paths; cleanup deferred to a separate refactor.
 _TRIAGE_BUDGET_USD = 1.0
 
 # Timeout for the triage subprocess in seconds.
@@ -457,13 +463,21 @@ async def run_triage(
             raise RuntimeError(f"Triage subprocess timed out after {_TRIAGE_TIMEOUT}s") from None
     else:
         # Claude one-shot mode: --print reads from stdin, writes to stdout.
+        # No --max-budget-usd on this branch: the claude backend runs under
+        # Max-plan OAuth, where the CLI tracks computed token cost regardless
+        # of whether any money is being charged. Passing the flag would
+        # terminate the subprocess at a ceiling that does not correspond to
+        # real billing. Runaway protection comes from _TRIAGE_TIMEOUT at the
+        # asyncio.wait_for call below: a stuck subprocess cannot hold the
+        # executor longer than that timeout, regardless of how many tokens
+        # it has notionally produced. _TRIAGE_BUDGET_USD stays defined for
+        # symmetry with the other budget defaults in this codebase; cleanup
+        # is deferred to a separate refactor.
         cmd = [
             "claude",
             "--print",
             "--model",
             _TRIAGE_MODEL,
-            "--max-budget-usd",
-            str(_TRIAGE_BUDGET_USD),
         ]
 
         # Resolve self-sudo: skip sudo when claude_user matches the bot

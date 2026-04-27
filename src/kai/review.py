@@ -51,11 +51,17 @@ _MAX_DIFF_CHARS = 100_000
 # Opus tokens. Sonnet is more than capable for code review.
 _REVIEW_MODEL = "sonnet"
 
-# Default per-review budget cap in USD. Overridable via PR_REVIEW_BUDGET_USD
-# in config; the Config field is the runtime source of truth. Kept here as a
-# fallback default for direct run_review() callers (tests, scripts) that do
-# not thread config through. Sonnet reviews of typical PRs cost well under
-# $0.50, so 1.0 is a headroom ceiling rather than a typical cost.
+# Default per-review budget cap in USD. Vestigial after #390:
+# --max-budget-usd is no longer emitted to claude --print argv on the
+# claude branch (Max-plan OAuth makes the CLI's computed-cost ceiling
+# a phantom signal), and the Goose branch uses --max-turns 1 rather
+# than a dollar ceiling, so the constant's only remaining role is to
+# provide the default for the `budget_usd` parameter on `run_review`
+# / `run_review_session` - a parameter that is itself unused on every
+# currently-exercised path. Retained for symmetry with
+# _TRIAGE_BUDGET_USD and to avoid changing public signatures (see
+# PR_REVIEW_BUDGET_USD env var); cleanup deferred to a separate
+# refactor that can also drop the `budget_usd` parameter.
 _REVIEW_BUDGET_USD = 1.0
 
 # Default subprocess timeout for a single review, in seconds. Overridable
@@ -661,6 +667,12 @@ async def run_review(
     agent_backend: str = "claude",
     provider: str = "",
     timeout_s: int = _REVIEW_TIMEOUT,
+    # `budget_usd` is unused on every currently-exercised path: the
+    # claude branch no longer emits --max-budget-usd to argv (#390),
+    # and the Goose branch uses --max-turns 1 rather than a dollar
+    # ceiling. Kept on the signature to avoid a public API break in
+    # this fix; cleanup deferred to a separate refactor that updates
+    # webhook.py and the test suite together.
     budget_usd: float = _REVIEW_BUDGET_USD,
 ) -> str:
     """
@@ -737,17 +749,20 @@ async def run_review(
             raise RuntimeError(f"Review subprocess timed out after {timeout_s}s") from None
     else:
         # Claude one-shot mode: --print reads from stdin, writes to stdout.
-        # Format budget as fixed-point (f-string :.4f) rather than str() so
-        # very small values never render in scientific notation like
-        # "1e-05", which the Claude CLI's numeric parser may reject. Four
-        # fractional digits cover any realistic per-review ceiling.
+        # No --max-budget-usd on this branch: the claude backend runs under
+        # Max-plan OAuth, where the CLI tracks computed token cost regardless
+        # of whether any money is being charged. Passing the flag would
+        # terminate the subprocess at a ceiling that does not correspond to
+        # real billing. Runaway protection comes from `timeout_s` at the
+        # asyncio.wait_for call below. The `budget_usd` parameter on the
+        # signature is unused on every currently-exercised path - see the
+        # comment on the parameter declaration above for the full rationale
+        # and why cleanup is deferred to a separate refactor.
         cmd = [
             "claude",
             "--print",
             "--model",
             _REVIEW_MODEL,
-            "--max-budget-usd",
-            f"{budget_usd:.4f}",
         ]
 
         # Resolve self-sudo: skip sudo when claude_user matches the bot
@@ -903,6 +918,8 @@ async def review_pr(
     agent_backend: str = "claude",
     provider: str = "",
     timeout_s: int = _REVIEW_TIMEOUT,
+    # See `run_review` above for why `budget_usd` is currently unused
+    # on every exercised path; cleanup deferred to a separate refactor.
     budget_usd: float = _REVIEW_BUDGET_USD,
 ) -> None:
     """

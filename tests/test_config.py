@@ -58,6 +58,7 @@ _CONFIG_ENV_VARS = [
     "MEMORY_EXTRACTION_BUDGET_USD",
     "MEMORY_EXTRACTION_TIMEOUT_S",
     "MEMORY_CONSOLIDATION_CANDIDATES_N",
+    "EPISODE_CLASSIFIER_CONTEXT_TURNS",
     "MEMORY_EPISODE_MODEL",
     "MEMORY_EPISODE_BUDGET_USD",
     "MEMORY_EPISODE_TIMEOUT_S",
@@ -1382,6 +1383,70 @@ class TestMemoryExtractionConfig:
     def test_consolidation_candidates_rejects_non_integer(self, monkeypatch):
         _set_required(monkeypatch)
         monkeypatch.setenv("MEMORY_CONSOLIDATION_CANDIDATES_N", "not-an-int")
+        with pytest.raises(SystemExit, match="must be an integer"):
+            load_config()
+
+
+# ── Episode classifier context window (issue #392) ───────────────────
+
+
+class TestEpisodeClassifierContextTurns:
+    """The EPISODE_CLASSIFIER_CONTEXT_TURNS env var: number of prior
+    exchanges fed to the stage-1 extractor as PRIOR CONTEXT for the
+    episode classifier. Range 0-10; 0 disables windowing entirely
+    (single-turn payload, pre-#392 production behavior). Upper cap
+    is defensive against typos that would blow Haiku's context
+    window (a 3000-turn window from a typo'd "3000" is a real risk
+    at config time)."""
+
+    def test_episode_classifier_context_turns_default(self, monkeypatch):
+        """Default 3 = 3 prior exchanges in addition to the current
+        one (4-turn payload window total; see Config docstring for
+        the N+1 framing). Pin the default so an unset env produces
+        production behavior."""
+        _set_required(monkeypatch)
+        config = load_config()
+        assert config.episode_classifier_context_turns == 3
+
+    def test_episode_classifier_context_turns_override(self, monkeypatch):
+        """Operator can tune up if real episodes are missed at the
+        default. Verifies the env var path threads through to Config."""
+        _set_required(monkeypatch)
+        monkeypatch.setenv("EPISODE_CLASSIFIER_CONTEXT_TURNS", "5")
+        config = load_config()
+        assert config.episode_classifier_context_turns == 5
+
+    def test_episode_classifier_context_turns_zero_accepted(self, monkeypatch):
+        """0 is the documented disable value: bot.py skips the
+        get_recent_pairs read entirely and the payload builder
+        renders no PRIOR CONTEXT block, reverting to pre-#392
+        single-turn behavior. Operators flip this when the windowed
+        prompt regresses in production."""
+        _set_required(monkeypatch)
+        monkeypatch.setenv("EPISODE_CLASSIFIER_CONTEXT_TURNS", "0")
+        config = load_config()
+        assert config.episode_classifier_context_turns == 0
+
+    def test_episode_classifier_context_turns_rejects_negative(self, monkeypatch):
+        _set_required(monkeypatch)
+        monkeypatch.setenv("EPISODE_CLASSIFIER_CONTEXT_TURNS", "-1")
+        with pytest.raises(SystemExit, match="non-negative"):
+            load_config()
+
+    def test_episode_classifier_context_turns_rejects_above_cap(self, monkeypatch):
+        """The defensive cap exists so a typo (3000 instead of 3)
+        cannot ship a single payload with ~3001 pairs in the PRIOR
+        CONTEXT block, which would exceed Haiku's per-call token
+        limit. Pin the cap behavior so a future edit that loosens
+        or removes it surfaces here."""
+        _set_required(monkeypatch)
+        monkeypatch.setenv("EPISODE_CLASSIFIER_CONTEXT_TURNS", "11")
+        with pytest.raises(SystemExit, match="must be <= 10"):
+            load_config()
+
+    def test_episode_classifier_context_turns_rejects_non_integer(self, monkeypatch):
+        _set_required(monkeypatch)
+        monkeypatch.setenv("EPISODE_CLASSIFIER_CONTEXT_TURNS", "abc")
         with pytest.raises(SystemExit, match="must be an integer"):
             load_config()
 

@@ -449,6 +449,202 @@ class TestBuildSessionContext:
         assert "Workspace Instructions" in result
         assert "Always respond in haiku form." in result
 
+    # ── Memory subsystem state marker (issue #403) ──────────────────
+
+    def test_memory_subsystem_marker_enabled(self, tmp_path):
+        """Marker line shows 'enabled' when memory_enabled=True is passed."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "memory").mkdir(parents=True)
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=True,
+            )
+
+        assert "[Memory subsystem: enabled]" in result
+        assert "[Memory subsystem: disabled]" not in result
+
+    def test_memory_subsystem_marker_disabled(self, tmp_path):
+        """Marker line shows 'disabled' when memory_enabled=False is passed."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "memory").mkdir(parents=True)
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=False,
+            )
+
+        assert "[Memory subsystem: disabled]" in result
+        assert "[Memory subsystem: enabled]" not in result
+
+    def test_memory_subsystem_marker_emitted_when_chat_id_none(self, tmp_path):
+        """Marker emits even when chat_id is None (per-deployment, not per-user)."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "memory").mkdir(parents=True)
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=True,
+            )
+
+        assert "[Memory subsystem: enabled]" in result
+
+    def test_memory_subsystem_marker_emitted_in_home_workspace(self, tmp_path):
+        """Marker emits even when workspace == home_workspace.
+
+        The identity block is conditionally skipped in this case (lines 214-221
+        in backend.py); the marker is not workspace-scoped and must always
+        emit so the routing rule in CLAUDE.md / PREFERENCES.md has a uniformly-
+        present signal to branch on.
+        """
+        workspace = tmp_path / "home"
+        workspace.mkdir()
+        (workspace / ".claude").mkdir()
+        (workspace / ".claude" / "CLAUDE.md").write_text("identity content")
+        data_dir = tmp_path / "data"
+        (data_dir / "memory").mkdir(parents=True)
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=True,
+            )
+
+        assert "[Memory subsystem: enabled]" in result
+        # Identity block correctly skipped (workspace == home_workspace,
+        # so the file is never read). Assert against the file content
+        # itself rather than the wrapper prose: a regression that broke
+        # the skip condition but emitted only the wrapper without the
+        # body would silently pass an "instructions" substring check.
+        assert "identity content" not in result
+
+    # ── MEMORY.md inject gate (issue #403) ──────────────────────────
+
+    def test_memory_md_skipped_when_enabled(self, tmp_path):
+        """MEMORY.md content is NOT injected when memory_enabled=True.
+
+        In enabled mode, Qdrant is the active fact surface (retrieved via
+        memory.format_context in claude.py). Injecting MEMORY.md would
+        create a dual-source collision. The block must be omitted entirely
+        even when MEMORY.md exists with content on disk.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        memory_dir = data_dir / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").write_text("User likes concise answers.")
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=True,
+            )
+
+        assert "User likes concise answers." not in result
+        assert "[Your persistent memory" not in result
+
+    def test_memory_md_injected_when_disabled(self, tmp_path):
+        """MEMORY.md IS injected when memory_enabled=False (current behavior preserved)."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        memory_dir = data_dir / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").write_text("User likes concise answers.")
+
+        with patch("kai.backend.get_recent_history", return_value=""):
+            result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=None,
+                data_dir=data_dir,
+                memory_enabled=False,
+            )
+
+        assert "User likes concise answers." in result
+        assert "[Your persistent memory" in result
+
+    def test_memory_md_gate_per_user_chat_id(self, tmp_path):
+        """The MEMORY.md inject gate applies on the per-user `chat_id is not None`
+        branch the same way it does on the global branch.
+
+        Both `chat_id=None` (global path at `memory/MEMORY.md`) and `chat_id=123`
+        (per-user path at `memory/<chat_id>/MEMORY.md`, introduced in #347) must
+        skip injection in enabled mode and inject in disabled mode. This pins the
+        gate's symmetry across both code paths.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        data_dir = tmp_path / "data"
+        per_user_dir = data_dir / "memory" / "123"
+        per_user_dir.mkdir(parents=True)
+        (per_user_dir / "MEMORY.md").write_text("Per-user fact.")
+
+        # Disabled mode: per-user MEMORY.md IS injected.
+        with patch("kai.backend.get_recent_history", return_value=""):
+            disabled_result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=123,
+                data_dir=data_dir,
+                memory_enabled=False,
+            )
+        assert "Per-user fact." in disabled_result
+        assert "memory/123/MEMORY.md" in disabled_result
+
+        # Enabled mode: per-user MEMORY.md is NOT injected.
+        with patch("kai.backend.get_recent_history", return_value=""):
+            enabled_result = build_session_context(
+                workspace=workspace,
+                home_workspace=workspace,
+                api=self._api(),
+                workspace_config=None,
+                chat_id=123,
+                data_dir=data_dir,
+                memory_enabled=True,
+            )
+        assert "Per-user fact." not in enabled_result
+        assert "[Your persistent memory" not in enabled_result
+
 
 # ── Test build_foreign_workspace_reminder ───────────────────────────
 

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -178,6 +179,121 @@ def _isolated_data_dir(tmp_root: Path) -> Iterator[Path]:
             # constructs a fresh client against its own DATA_DIR.
             memory_module._memory = None
             memory_module._config = None
+
+
+@contextmanager
+def _capture_recall_logs() -> Iterator[list[logging.LogRecord]]:
+    """Capture every LogRecord emitted to the `kai.memory` logger
+    during the with-block and yield the (initially empty) list to
+    the caller. The list is populated as records arrive and is
+    safe to inspect after the with-block exits.
+
+    Why a manual `logging.Handler` rather than pytest's `caplog`
+    fixture: the harness runs from a CLI entry point, NOT under
+    pytest, so the fixture is unavailable. The pytest test pair at
+    `tests/test_eval_modeswitch.py::TestRecallReasonField` uses
+    `caplog` (the idiomatic pytest tool); the two surfaces capture
+    the same records via different mechanisms, both correct for
+    their context.
+
+    Records are appended in the order they arrive. The harness's
+    callers only inspect the most-recent record (a single
+    `format_context` call is made per use of this contextmanager),
+    but the list keeps prior records too in case future callers
+    want to assert on multi-call sequences.
+
+    Each fresh use creates a new `_ListHandler` instance and a new
+    list, so a residual handler from a prior run cannot pollute
+    THIS run's records. Removal in the `finally` block guards
+    against handler leaks across calls.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler()
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("kai.memory")
+    # Save and lower the logger level so the `memory.recall` line
+    # (emitted via `log.info(...)`) is forwarded to our handler
+    # regardless of the harness's outer logging configuration. The
+    # CLI's `logging.basicConfig(level=logging.WARNING, ...)` would
+    # otherwise filter INFO-level records out before they reach the
+    # handler.
+    #
+    # Disable propagation while the handler is attached so the
+    # captured records do not also fan out to the root logger. The
+    # CLI entry point's `basicConfig(level=WARNING)` already filters
+    # them, but during pytest runs the root logger may be configured
+    # at INFO and the records would appear duplicated in console
+    # output. Restored in `finally` so other code paths that rely on
+    # propagation are not affected after the with-block.
+    prior_level = logger.level
+    prior_propagate = logger.propagate
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+        logger.propagate = prior_propagate
+
+
+def _parse_recall_reason(records: list[logging.LogRecord]) -> str | None:
+    """Pull the `reason` field from the most-recent `memory.recall`
+    log record in `records`. Returns None if no such record exists,
+    if the record's payload is malformed, or if the payload's
+    `reason` field is absent.
+
+    The payload format is fixed at the producer
+    (`memory._emit_recall_log`): a compact JSON object preceded by
+    the literal prefix `"memory.recall "`. Splitting on the first
+    space and `json.loads`-decoding the tail is the inverse of the
+    producer's `log.info("memory.recall %s", json.dumps(payload, ...))`.
+
+    Returns the value of the `reason` field cast to `str`, or None
+    on any decode failure, shape mismatch, or success-path payload
+    where `reason` is omitted entirely (per `_base_recall_payload`'s
+    docstring: `reason` is set only on short-circuit lines).
+
+    Caller-side interpretation differs by mode. The disabled-mode
+    caller compares `parsed == _RECALL_REASON_DISABLED` and treats
+    None as a failing outcome (it neither equals nor implies the
+    expected reason string). The enabled-mode caller compares
+    `parsed != _RECALL_REASON_DISABLED` and treats None as a
+    PASSING outcome, since the success-path payload omits `reason`
+    entirely and that absence is part of the documented contract.
+    """
+    prefix = "memory.recall "
+    for record in reversed(records):
+        msg = record.getMessage()
+        if not msg.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(msg[len(prefix) :])
+        except ValueError:
+            # `json.JSONDecodeError` is a subclass of `ValueError`
+            # since Python 3.5, so the bare `ValueError` covers
+            # both the well-formed-but-invalid-JSON case and the
+            # malformed-input case that JSONDecodeError raises.
+            #
+            # `continue` rather than `return None` so a single
+            # malformed trailing record does not shadow earlier
+            # well-formed records. Today's callers pass a list with
+            # exactly one `memory.recall` record per capture block,
+            # but a future multi-record caller would silently
+            # observe `None` for "valid records exist but the most
+            # recent is bad," which is the wrong shape. The final
+            # `return None` outside the loop still handles the
+            # no-records case.
+            continue
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return reason if isinstance(reason, str) else None
+    return None
 
 
 def _build_test_configs(memory_enabled_value: bool) -> Config:
@@ -377,6 +493,52 @@ async def _run_verify() -> int:
                 )
             )
 
+            # Disabled-mode recall-log reason invariant. Drives
+            # `format_context` under a config with memory_enabled=False
+            # so init_memory short-circuits at its
+            # `if not config.memory_enabled: return` guard, leaving
+            # `_memory` and `_config` as None. format_context then
+            # short-circuits via its `if not is_enabled() or _config
+            # is None:` branch and emits a `memory.recall` log line
+            # with `reason: "disabled"`. The invariant verifies the
+            # log-line contract that downstream eval harnesses depend
+            # on (a missing or wrongly-tagged record under disabled
+            # mode would silently break those harnesses).
+            #
+            # Deferred to preserve the `if "kai.memory" in sys.modules:`
+            # invariant guarded at the top of `_run_verify`. A
+            # top-level `from kai.memory import _RECALL_REASON_DISABLED`
+            # in this module would put `kai.memory` into `sys.modules`
+            # before `_run_verify` runs, tripping the assertion. The
+            # constant itself is a string literal and does not boot
+            # Mem0 or touch the migrations_qdrant lock; the deadlock
+            # concern that motivates `_isolated_data_dir`'s lazy
+            # import does not apply directly to this constant. The
+            # consistency-with-the-guard rationale is what carries
+            # the deferral.
+            from kai.memory import _RECALL_REASON_DISABLED
+
+            with _isolated_data_dir(tmp_root):
+                from kai import memory as memory_module
+
+                memory_module.init_memory(_build_test_configs(memory_enabled_value=False))
+                with _capture_recall_logs() as disabled_recall_records:
+                    await memory_module.format_context(_FIXTURE_QUERY, user_id=str(_FIXTURE_CHAT_ID))
+
+            disabled_reason = _parse_recall_reason(disabled_recall_records)
+            disabled_reason_ok = disabled_reason == _RECALL_REASON_DISABLED
+            results.append(
+                _InvariantResult(
+                    name="disabled: recall log reason is 'disabled'",
+                    passed=disabled_reason_ok,
+                    detail=(
+                        ""
+                        if disabled_reason_ok
+                        else f"got reason={disabled_reason!r}, expected {_RECALL_REASON_DISABLED!r}"
+                    ),
+                )
+            )
+
             # ── Enabled-mode invariants ───────────────────────────
             enabled_ctx = build_session_context(
                 workspace=ws,
@@ -410,13 +572,22 @@ async def _run_verify() -> int:
             # and assert the recall block either is empty or starts
             # with the expected header. Both shapes are valid; the
             # invariant is the prefix check, not a presence claim.
+            #
+            # The same invocation is wrapped in `_capture_recall_logs`
+            # so we can additionally assert the `memory.recall` log
+            # line carries a non-disabled `reason`. format_context
+            # emits exactly one log line per call (multiple internal
+            # short-circuit branches all funnel through
+            # `_emit_recall_log` once), so the most-recent record
+            # under capture is the one we want.
             recall_text = ""
             with _isolated_data_dir(tmp_root):
                 from kai import memory as memory_module
 
                 memory_module.init_memory(_build_test_configs(memory_enabled_value=True))
                 await _seed_fixture_fact(user_id=str(_FIXTURE_CHAT_ID))
-                recall_text = await memory_module.format_context(_FIXTURE_QUERY, user_id=str(_FIXTURE_CHAT_ID))
+                with _capture_recall_logs() as enabled_recall_records:
+                    recall_text = await memory_module.format_context(_FIXTURE_QUERY, user_id=str(_FIXTURE_CHAT_ID))
 
             recall_ok = recall_text == "" or recall_text.startswith(_MARKER_RELEVANT_MEMORIES)
             results.append(
@@ -424,6 +595,38 @@ async def _run_verify() -> int:
                     name="enabled: format_context returns empty or recall-prefixed",
                     passed=recall_ok,
                     detail=(f"got {recall_text[:80]!r}" if not recall_ok else ""),
+                )
+            )
+
+            # Enabled-mode recall-log reason invariant. Asserts the
+            # negative (reason != "disabled") rather than enumerating
+            # specific allowed values so a future new reason added in
+            # `memory.py`'s `_RECALL_REASON_*` enum does not break
+            # this test. The match-positively-on-disabled / match-
+            # negatively-on-enabled split mirrors the spec contract:
+            # disabled mode MUST emit reason="disabled"; enabled mode
+            # MAY emit any of the non-disabled reasons depending on
+            # whether the seeded fact lands above the relevance floor,
+            # whether the query is empty, etc.
+            #
+            # `_parse_recall_reason` returns None when the payload's
+            # `reason` field is missing, which is the documented
+            # success-path shape (per `_base_recall_payload`'s
+            # docstring: `reason` is omitted on success, present only
+            # on short-circuit lines). Both None and any non-disabled
+            # string satisfy the invariant; only the literal string
+            # equal to `_RECALL_REASON_DISABLED` fails it.
+            enabled_reason = _parse_recall_reason(enabled_recall_records)
+            enabled_reason_ok = enabled_reason != _RECALL_REASON_DISABLED
+            results.append(
+                _InvariantResult(
+                    name="enabled: recall log reason is not 'disabled'",
+                    passed=enabled_reason_ok,
+                    detail=(
+                        ""
+                        if enabled_reason_ok
+                        else f"got reason={enabled_reason!r}, expected anything OTHER than {_RECALL_REASON_DISABLED!r}"
+                    ),
                 )
             )
 

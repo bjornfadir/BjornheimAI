@@ -1657,11 +1657,18 @@ def _generate_sudoers(
         target_users.append(candidate)
 
     if target_users:
-        # Resolve the actual binary location; fall back to the native installer's
-        # default path under the service user's home if claude is not on PATH
-        # (e.g., when running under sudo with a stripped environment).
+        # Anchor the rule path to the SERVICE user's claude install. The
+        # bot spawns `sudo -u <target> -- claude` and sudo resolves the
+        # bare `claude` against the caller's PATH (the service user's,
+        # not the target's), so the rule must reference the service
+        # user's binary. shutil.which("claude") used to be the first
+        # half of this expression but resolved against whatever PATH
+        # root happened to have when `sudo make install` ran - which
+        # picked up any user's `~/.local/bin/claude` that happened to
+        # be on PATH at install time, baking the wrong path into the
+        # rule and breaking the bot's sudo dispatch.
         svc_home = _user_home(service_user)
-        claude_bin = shutil.which("claude") or f"{svc_home}/.local/bin/claude"
+        claude_bin = f"{svc_home}/.local/bin/claude"
         # SETENV: allows the service user to pass env vars (e.g.,
         # KAI_WEBHOOK_SECRET) through sudo to the claude process.
         # Scoped to per-user rules only; cat/tee rules remain locked down.
@@ -3387,6 +3394,28 @@ def _apply_sudoers(
     # would hit the same error with worse blast radius (partial install).
     os_users = _collect_os_users_from_yaml(users_yaml_path)
     sudoers_content = _generate_sudoers(service_user, claude_user, os_users)
+
+    # Backstop check: the per-user rules pin the claude binary to
+    # {service_user_home}/.local/bin/claude (the native-installer
+    # location and where the bot's runtime PATH resolves `claude`).
+    # If the service user installed claude somewhere else (Homebrew,
+    # npm global, pipx), the rule will point at a nonexistent or
+    # mismatched binary and the bot's sudo dispatch will fail at
+    # runtime with no obvious cause. Warn loudly but do not abort -
+    # the warning catches the simple "wrong path" case; the operator
+    # still owns the symlink or reinstall to make the paths agree.
+    has_target_users = bool(claude_user) or bool(os_users)
+    if has_target_users:
+        expected_bin = Path(f"{_user_home(service_user)}/.local/bin/claude")
+        if not expected_bin.exists():
+            print(
+                f"Warning: {expected_bin} not found; sudoers rule may point at "
+                "a nonexistent binary. The bot's runtime spawn resolves bare "
+                "`claude` against the service user's PATH - install claude via "
+                "the native installer (`~/.local/bin/claude`) or symlink your "
+                "existing install there to keep the rule and runtime in sync.",
+                file=sys.stderr,
+            )
 
     if dry_run:
         print(f"[DRY RUN] Would write: {sudoers_path} (mode 0440)")

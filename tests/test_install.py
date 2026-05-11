@@ -414,11 +414,15 @@ class TestGenerateSudoers:
         assert result.count(f"SETENV: NOPASSWD: {bin_path}") == 3
 
     def test_duplicate_os_users_deduped(self, monkeypatch):
-        """Acceptance (c, dedupe): repeated os_user values produce one rule."""
+        """Acceptance (c, dedupe): repeated os_user values produce one ruleset each."""
         monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
         result = _generate_sudoers("kai", os_users=["sellison", "sellison", "bob"])
-        assert result.count("(sellison)") == 1
-        assert result.count("(bob)") == 1
+        # Each target gets two rules now (claude + kill, #456). Count
+        # the claude rules specifically to verify dedup at the target
+        # level - the kill rules add their own occurrences of "(name)"
+        # so a bare count("(name)") would double.
+        assert result.count("kai ALL=(sellison) SETENV: NOPASSWD: ") == 1
+        assert result.count("kai ALL=(bob) SETENV: NOPASSWD: ") == 1
 
     def test_os_user_matching_service_user_skipped(self, monkeypatch):
         """Acceptance (d): os_user == service_user → no rule (self-sudo path)."""
@@ -434,10 +438,88 @@ class TestGenerateSudoers:
     def test_legacy_claude_user_combined_with_os_users(self, monkeypatch):
         """Legacy CLAUDE_USER and yaml os_users coexist; deduped."""
         monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
-        # claude_user and os_users overlap on "alice"; should produce one rule.
+        # claude_user and os_users overlap on "alice"; should produce
+        # one ruleset (claude + kill rules, #456) for each distinct
+        # target. Count claude rules specifically to skip kill-rule
+        # noise on the same target name.
         result = _generate_sudoers("kai", claude_user="alice", os_users=["alice", "bob"])
-        assert result.count("(alice)") == 1
-        assert result.count("(bob)") == 1
+        assert result.count("kai ALL=(alice) SETENV: NOPASSWD: ") == 1
+        assert result.count("kai ALL=(bob) SETENV: NOPASSWD: ") == 1
+
+    # -- Issue #456: per-target kill rule for cross-user signal escalation ----
+
+    def test_kill_rule_emitted_per_target(self, monkeypatch):
+        """
+        Each per-target ruleset includes a NOPASSWD rule for the kill
+        binary alongside the claude binary rule. The bot uses this to
+        escalate signals to the inner claude grandchild via
+        `sudo -n -u <target> /bin/kill -<sig> <pid>` in cross-user
+        mode, because POSIX signal permissions prevent the service
+        user from signaling a target-user process directly.
+        """
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        result = _generate_sudoers("kai", os_users=["alice", "bob"])
+        assert "kai ALL=(alice) NOPASSWD: /bin/kill" in result
+        assert "kai ALL=(bob) NOPASSWD: /bin/kill" in result
+
+    def test_kill_rule_omitted_when_no_targets(self, monkeypatch):
+        """No targets → no kill rules (no cross-user spawn to escalate to)."""
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        result = _generate_sudoers("kai", os_users=[])
+        assert "kill" not in result
+
+    def test_kill_rule_no_setenv(self, monkeypatch):
+        """
+        The kill rule must NOT carry SETENV: - kill ignores env, and
+        a SETENV grant on the kill path would broaden the env-var
+        exposure surface beyond what the claude rule needs. Only the
+        claude rule keeps SETENV (for KAI_WEBHOOK_SECRET, TMPDIR).
+        """
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        result = _generate_sudoers("kai", os_users=["alice"])
+        # Filter to actual sudoers rule lines (skip the comment
+        # block above the per-target rules - it mentions "kill" in
+        # English explaining the scope tradeoff).
+        rule_lines = [line for line in result.splitlines() if line.startswith("kai ALL=")]
+        kill_lines = [line for line in rule_lines if "kill" in line]
+        assert len(kill_lines) == 1
+        assert "SETENV" not in kill_lines[0]
+        # The claude rule still has SETENV (unchanged by #456).
+        claude_lines = [line for line in rule_lines if "claude" in line]
+        assert len(claude_lines) == 1
+        assert "SETENV" in claude_lines[0]
+
+    def test_kill_rule_path_is_hardcoded(self, monkeypatch):
+        """
+        The kill rule must always emit /bin/kill regardless of what
+        shutil.which("kill") would resolve to on the install host.
+        Pre-fix the generator used `shutil.which("kill") or
+        "/bin/kill"` which on Linux could bake `/usr/bin/kill` into
+        the sudoers rule; the runtime invokes `/bin/kill` literally,
+        and a path mismatch causes sudo to silently fail the
+        escalation (recreating the orphan-leak bug this PR aims to
+        close). Regression guard: even when shutil.which would have
+        returned a different path, the rule still says /bin/kill.
+        """
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        # Guard: the production code no longer calls
+        # shutil.which("kill") - kill_bin is the literal
+        # "/bin/kill". This monkeypatch is intentionally a no-op
+        # against the current implementation; it exists so that
+        # if a future change re-introduces the `shutil.which("kill")
+        # or "/bin/kill"` pattern that PR #458 removed, this
+        # assertion would catch the resulting path mismatch
+        # (which would silently break cross-user kill escalation
+        # on Linux hosts where shutil.which returns /usr/bin/kill).
+        real_which = shutil.which
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda n: "/usr/bin/kill" if n == "kill" else real_which(n),
+        )
+        result = _generate_sudoers("kai", os_users=["alice"])
+        assert "kai ALL=(alice) NOPASSWD: /bin/kill" in result
+        assert "/usr/bin/kill" not in result
 
 
 class TestCollectOsUsersFromYaml:

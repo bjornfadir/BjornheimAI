@@ -1669,11 +1669,54 @@ def _generate_sudoers(
         # rule and breaking the bot's sudo dispatch.
         svc_home = _user_home(service_user)
         claude_bin = f"{svc_home}/.local/bin/claude"
+        # kill(1) for the cross-user kill escalation (#456). The bot
+        # runs `sudo -n -u <target> /bin/kill -<sig> <pid>` against
+        # the inner claude grandchild because POSIX signal permissions
+        # prevent the service user from signaling a target-user
+        # process directly. The runtime invocation pins the absolute
+        # path /bin/kill so sudo's secure_path resolution cannot
+        # silently pick a different binary than the rule names; the
+        # sudoers rule must match the runtime path exactly. /bin/kill
+        # is canonical on macOS and on Linux with merged-usr
+        # (/bin -> /usr/bin); on older Linux without merged-usr,
+        # /bin/kill is a real binary and behaves the same for the
+        # `kill -<sig> <pid>` calls we use here. Same anchoring
+        # rationale as the claude_bin fix in PR #455.
+        kill_bin = "/bin/kill"
         # SETENV: allows the service user to pass env vars (e.g.,
         # KAI_WEBHOOK_SECRET) through sudo to the claude process.
-        # Scoped to per-user rules only; cat/tee rules remain locked down.
+        # Scoped to the claude rule only; the kill rule does not
+        # need SETENV (kill ignores env entirely), and the cat/tee
+        # config-read rules above remain locked down.
+        #
+        # Scope note for the generated rules below (also surfaced
+        # as an inline comment in /etc/sudoers.d/kai itself so
+        # operators reading the file can see this is deliberate):
+        # the kill rule allows the service user to run /bin/kill
+        # as <target> with ANY arguments, which means it can
+        # signal any <target>-owned process - not just the inner
+        # claude grandchild. A PID-locked rule would be tighter
+        # but sudoers argument matching is not safe per the
+        # sudo(8) manual (Defaults entries warn against it; a
+        # crafted argument can bypass the pattern). In practice
+        # the scope delta is zero: the claude rule above already
+        # grants arbitrary code execution as <target>, so an
+        # attacker with the service user can already `claude
+        # bash -c "kill -9 -1"`. The kill rule just adds a faster
+        # path for the bot's normal cleanup flow.
+        rules += textwrap.dedent("""\
+
+            # Per-target sudoers rules for the cross-os-user inner Claude spawn.
+            # The claude rule grants arbitrary code execution as <target> (claude has
+            # Bash/Read/Write tools); the kill rule grants signal delivery to any
+            # <target>-owned process. The kill rule's scope is broader than a
+            # PID-locked rule because sudoers argument matching is not safe per
+            # sudo(8). The kill rule is a strict subset of capabilities the claude
+            # rule already provides; the practical delta is zero. See PR #458.
+        """)
         for target in target_users:
             rules += f"{service_user} ALL=({target}) SETENV: NOPASSWD: {claude_bin}\n"
+            rules += f"{service_user} ALL=({target}) NOPASSWD: {kill_bin}\n"
 
     return rules
 

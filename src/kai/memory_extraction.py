@@ -89,7 +89,18 @@ log = logging.getLogger(__name__)
 # substring appears verbatim in an ASSISTANT message in the window.
 # The bump lets post-rollout log analysis cleanly partition facts
 # produced under the speaker-attribution prompt from earlier ones.
-_EXTRACTION_PROMPT_VERSION: str = "8"
+# v9 (2026-05-12): swapped the negative-list IGNORE block and the
+# 30-day DURABILITY TEST for a single positive criterion (QUALITY
+# TEST). The criterion asks "would this fact help a future
+# conversation that does not include the current turn?" applied per
+# candidate, with six worked examples (three emit, three do not emit)
+# anchoring the counterfactual reasoning. Negative-list growth from
+# v6 / v7 prompts was bounded by the author's enumeration of failure
+# modes; the positive criterion generalizes to phrasings the list has
+# not seen. Schema unchanged; the bump lets post-rollout log analysis
+# distinguish facts produced under the positive-criterion prompt from
+# earlier exclusion-list iterations.
+_EXTRACTION_PROMPT_VERSION: str = "9"
 
 # Sibling of _EXTRACTION_PROMPT_VERSION for stage-2 episode generation.
 # Stored in each episode's metadata so future cleanups can target a
@@ -365,7 +376,7 @@ STORE these fact types:
   must be per-user, not shared"). NOT workflow micro-decisions
   about which task to do next, which spec to evaluate, or which
   issue to file - those are transient session activity. Apply the
-  DURABILITY TEST below.
+  QUALITY TEST below.
 - Actions the user confirmed happened, BUT with strict evidence
   rules to prevent laundered hallucinations:
   1. A confirmed_action fact must include a `confirmation_quote`
@@ -385,47 +396,42 @@ STORE these fact types:
 - Constraints or requirements the user stated ("must be local",
   "must not use external APIs", "never commit without running tests").
 
-IGNORE:
-- Assistant self-reports of completed actions unless user-confirmed
-  ("I saved the file", "Done", "Created X", "Pushed to main").
-  Treat these as unverified until the user confirms.
-- Assistant speculation, hypotheticals, or hedging ("I think...",
-  "it might be...", "probably...").
-- Intermediate reasoning, tool-output summaries, step-by-step plans.
-- Transient conversation state (what you are mid-doing, open
-  questions, clarifying requests).
-- Workflow-event metadata: spec/PR/issue lifecycle events. Examples
-  to NOT extract: "Spec X v3 was approved", "PR Y received a review
-  verdict of Z", "All N findings were closed in vM",
-  "The evaluation of spec Q produced a verdict of R". The durable
-  artifact is the spec/PR/issue itself; events around it are
-  transient session activity that loses meaning once the event
-  closes.
-- "Decisions to do" workflow actions: a decision to file an issue,
-  create a spec, request an evaluation, run a test, or perform
-  any other workflow action. The artifact produced (the issue,
-  the spec, the test result) is the durable fact; the
-  decision-to-do is workflow noise. Examples to NOT extract:
-  "User decided to file an issue about X", "User requested
-  evaluation of spec Y", "User decided to address issue #Z",
-  "User confirmed test input triggered the pipeline".
-- Casual chat, greetings, acknowledgments, thanks without content.
-- Anything that contradicts a stated user preference.
-- Code snippets, file contents, error messages (store facts about
-  them if needed, not the raw text).
+QUALITY TEST:
 
-DURABILITY TEST:
+Before emitting any fact, ask: "Would this fact help a future
+conversation that does not include the current turn?" If no, do
+not emit it.
 
-Before emitting any fact, ask: "would this still be useful context
-in 30 days?" If the answer is no - because the fact captures a
-workflow event, a one-off task decision, a status of work in
-progress that will have shipped or moved on, or a session-event
-metadata fragment - do not emit it. The 30-day test catches the
-most common low-quality extraction: session-event metadata that
-reads as fact-shaped but loses meaning once the event closes.
+The question is counterfactual: imagine a future session where the
+current exchange is gone but the user is asking about the same
+topic. Would having this fact in memory help that future session?
+If the fact only makes sense alongside the current turn (workflow
+event, status update, in-progress task state, procedural fragment),
+the answer is no and the fact should not be emitted.
 
-If a fact passes IGNORE rules but fails the durability test,
-do not emit it.
+Worked examples (emit / do not emit):
+
+- User says "I prefer Celsius." -> emit. Useful in any future
+  conversation about units.
+- Assistant says "Spec X v3 was approved" and user replies "great".
+  -> do not emit. The artifact (the spec) is durable; the approval
+  event is workflow noise that loses meaning once v4 ships.
+- User says "I live in Toronto." -> emit. Useful in any future
+  conversation about location, weather, scheduling.
+- User says "Let's file an issue about X." -> do not emit. The
+  artifact (the issue) is durable; the decision-to-file is workflow
+  state that ends once the issue is filed.
+- User says "My laptop is a 2024 M3 MacBook Pro." -> emit. Useful
+  in any future conversation about hardware, performance, costs.
+- Assistant says "I'm extracting facts now" with no user response.
+  -> do not emit. Assistant self-report, not a fact about the user
+  or the world.
+- User says "I'm writing the spec now." -> do not emit. In-progress
+  task state; loses meaning once the spec is shipped.
+
+If a candidate fact passes this test, proceed to STORE-block
+classification (above). If it fails, return an empty facts list
+for that candidate slot.
 
 CONFIDENCE:
 - Only store facts you can phrase as a single clear sentence.
@@ -1043,7 +1049,7 @@ _CONSOLIDATION_INTENTS: frozenset[str] = frozenset({"new", "update_of", "skip_re
 # whose content is pure session-event metadata: spec/PR/issue
 # lifecycle events and "User decided/requested to <workflow-action>"
 # wordings. Pattern is intentionally narrower than the prompt's
-# IGNORE rules; the prompt is the primary gate, this regex is
+# QUALITY TEST; the prompt is the primary gate, this regex is
 # defense-in-depth for the cases where the model emits noise despite
 # the prompt. The model can defeat the regex by paraphrasing; a
 # future broader pattern (or per-extractor model upgrade) can be
@@ -1066,7 +1072,7 @@ _WORKFLOW_EVENT_RE = re.compile(
     # "User ..." (the canonical example in FORMAT); the operator-
     # specific "OC" subject is included as defense-in-depth for
     # operator history that contains it. Broader paraphrases are
-    # left for the prompt's IGNORE rules. A future maintainer who
+    # left for the prompt's QUALITY TEST. A future maintainer who
     # needs to catch non-leading subjects should drop the `^`
     # rather than only adding more verbs.
     r"^(User|OC)\s+(decided|requested)\s+to\s+"
@@ -1094,7 +1100,7 @@ _WORKFLOW_EVENT_RE = re.compile(
     # Arm 4: "The evaluation of (spec|specification|issue|PR) X
     # (produced|was|determined) Y". Past-tense / determined
     # variants only; broader paraphrases are left to the prompt's
-    # IGNORE rules.
+    # QUALITY TEST.
     r"\b(evaluation\s+of\s+(spec(ification)?|issue|PR)\s+\S+"
     r"\s+(produced|was|determined))\b"
     r")",
@@ -1521,7 +1527,7 @@ def _validate_facts(
             continue
 
         # Rule 6: reject workflow-event-shaped content. Defense-in-depth
-        # against the prompt's IGNORE rules missing edge cases. The
+        # against the prompt's QUALITY TEST missing edge cases. The
         # rejection is logged at INFO (not DEBUG) because the rate of
         # Rule 6 rejections is itself an operational signal: if Rule 6
         # fires often the prompt is leaking, and the prompt should be

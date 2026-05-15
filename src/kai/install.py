@@ -1152,6 +1152,19 @@ def _cmd_config() -> None:
             env["CODEX_AUTH_MODE"] = codex_auth_mode
         if codex_api_key:
             env["OPENAI_API_KEY"] = codex_api_key
+        # Persist the resolved codex binary path so the running bot
+        # invokes the same absolute path as the sudoers rule. Sudo
+        # uses the service user's PATH to resolve bare command names,
+        # and on multi-user installs codex usually lives in a per-
+        # os_user home that isn't on the service PATH - the spawn
+        # then fails with "a password is required" because sudo
+        # can't find a binary to match the rule against. Only
+        # emitted when explicitly set via CODEX_BIN at install time,
+        # otherwise the runtime falls back to bare "codex" (correct
+        # for single-user installs where it's on PATH).
+        codex_bin = os.environ.get("CODEX_BIN")
+        if codex_bin:
+            env["CODEX_BIN"] = codex_bin
 
     # Remove stale renamed keys if present - leaving both the old and
     # new key causes silent confusion (the deprecation warning is
@@ -2973,6 +2986,17 @@ def _cmd_apply() -> None:
         _apply_models(install_path, dry_run)
 
         # -- Step 5: Write secrets --
+        # Inject CODEX_BIN from the apply-time env so a multi-user
+        # codex install can pin an absolute codex path without
+        # round-tripping through the wizard. Apply-time env wins over
+        # any stale value already in install.conf so the operator's
+        # explicit `sudo CODEX_BIN=... kai install apply` is honored.
+        # Only codex installs care; on other backends the var is
+        # ignored at runtime so writing it is harmless but noisy -
+        # skip the write to keep /etc/kai/env clean.
+        env_codex_bin = os.environ.get("CODEX_BIN")
+        if env_codex_bin and env.get("AGENT_BACKEND") == "codex":
+            env["CODEX_BIN"] = env_codex_bin
         _apply_secrets(env, dry_run)
 
         # -- Step 6: Deploy Goose config (if backend=goose) --

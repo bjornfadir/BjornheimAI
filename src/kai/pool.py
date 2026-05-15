@@ -23,12 +23,14 @@ from kai import sessions
 from kai.backend import AgentBackend, StreamEvent, resolve_home_workspace
 from kai.claude import ClaudeCodeBackend
 from kai.config import (
+    CODEX_DEFAULT_MODEL,
     OPEN_ENDED_PROVIDERS,
     PROVIDER_DEFAULTS,
     Config,
     WorkspaceConfig,
     get_effective_provider,
-    validate_model_for_provider,
+    get_user_backend_and_provider,
+    validate_model_for_backend,
 )
 from kai.goose import GooseBackend
 from kai.workspace_utils import is_workspace_allowed
@@ -117,17 +119,26 @@ class SubprocessPool:
         ws_config = self._config.get_workspace_config(workspace)
 
         # Per-user backend and provider, falling back to global config.
-        backend = user.agent_backend if user and user.agent_backend else self._config.agent_backend
-        provider = user.llm_provider if user and user.llm_provider else self._config.llm_provider
-
-        # Per-user model. When the user's effective provider differs from
-        # the global provider, the global default_model may not be valid.
-        # Fall back to the provider's default model instead.
-        effective_provider = get_effective_provider(backend, provider)
+        # Routed through the canonical get_user_backend_and_provider
+        # resolver so codex always reports provider="openai" even when
+        # llm_provider is unset, matching the same cascade bot.py and
+        # the install-time validator use. Without this, a user with
+        # `agent_backend: codex` on a globally-claude install ended up
+        # with effective_provider="" and the fallback below dispatched
+        # the global default_model ("sonnet"), which codex CLI rejects.
+        backend, effective_provider = get_user_backend_and_provider(user, self._config)
+        # get_effective_provider hardcodes the backend->provider rule for
+        # claude (anthropic) and codex (openai) so global_provider lines
+        # up with effective_provider whenever the user has not overridden
+        # the backend; no codex-specific patch needed here.
         global_provider = get_effective_provider(self._config.agent_backend, self._config.llm_provider)
+
+        # Per-user model. When the user's effective backend differs
+        # from the global one, the global default_model may not be
+        # valid; fall back to the per-backend default instead.
         if user and user.model:
             model = user.model
-        elif effective_provider == global_provider:
+        elif backend == self._config.agent_backend and effective_provider == global_provider:
             model = self._config.default_model
             # Catch the case where the global backend itself is an open-ended
             # provider and DEFAULT_MODEL is something generic like "sonnet".
@@ -141,6 +152,12 @@ class SubprocessPool:
                     chat_id,
                     model,
                 )
+        elif backend == "codex":
+            # Per-user codex override on a non-codex global install.
+            # Use codex's own default (gpt-5.5) - not PROVIDER_DEFAULTS["openai"]
+            # which goose-on-openai still consults and which would
+            # bypass the codex/goose surface separation.
+            model = CODEX_DEFAULT_MODEL
         else:
             model = PROVIDER_DEFAULTS.get(effective_provider, "")
             if not model:
@@ -195,7 +212,7 @@ class SubprocessPool:
                 services_info=self._services_info,
                 workspace_config=ws_config,
                 max_context_window=context_window,
-                provider=provider,
+                provider=effective_provider,
                 memory_enabled=self._config.memory_enabled,
             )
 
@@ -319,20 +336,47 @@ class SubprocessPool:
             # because the value is baked into the CLI command at startup)
             needs_restart = False
 
-            # Model: only apply if workspace config didn't set one.
-            # Validate against the instance's provider - a provider change
-            # (in users.yaml) can invalidate a stored model.
-            ws_model = instance.workspace_config.model if instance.workspace_config else None
-            if not ws_model and "model" in db_settings and db_settings["model"] != instance.model:
+            # Class-name inspection rather than an explicit instance
+            # attribute keeps the ABC free of backend-name leakage;
+            # mirrors the same shape bot.py uses for runtime backend
+            # resolution. Hoisted out of the DB-model branch because the
+            # ws_model guard below also needs it.
+            instance_cls = type(instance).__name__
+            if instance_cls == "CodexBackend":
+                instance_backend = "codex"
+            elif instance_cls == "GooseBackend":
+                instance_backend = "goose"
+            else:
+                instance_backend = "claude"
+
+            # Model: only apply if workspace config has a VALID model
+            # for this backend. A workspaces.yaml entry like
+            # `model: gpt-5.4-nano` applied to a codex instance is
+            # rejected by apply_workspace_model() at backend __init__
+            # time (the helper returns the current model and logs a
+            # warning), but the original WorkspaceConfig - still
+            # carrying the invalid model field - remains stored on
+            # instance.workspace_config. Treating any non-empty
+            # workspace_config.model as precedence-bearing therefore
+            # blocks a valid per-user DB model (e.g. gpt-5.4-mini)
+            # even though the workspace override was never applied.
+            # Re-run the same validation here so the precedence guard
+            # matches what was actually applied to instance.model.
+            ws_model_raw = instance.workspace_config.model if instance.workspace_config else None
+            ws_model_applied = bool(
+                ws_model_raw and validate_model_for_backend(ws_model_raw, instance_backend, instance.provider)
+            )
+            if not ws_model_applied and "model" in db_settings and db_settings["model"] != instance.model:
                 stored_model = db_settings["model"]
-                if validate_model_for_provider(stored_model, instance.provider):
+                if validate_model_for_backend(stored_model, instance_backend, instance.provider):
                     instance.model = stored_model
                     needs_restart = True
                 else:
                     log.warning(
-                        "Ignoring stored model '%s' for user %d (invalid for provider '%s')",
+                        "Ignoring stored model '%s' for user %d (invalid for backend '%s'/provider '%s')",
                         stored_model,
                         chat_id,
+                        instance_backend,
                         instance.provider,
                     )
 

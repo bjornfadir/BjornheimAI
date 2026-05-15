@@ -99,14 +99,38 @@ PROVIDER_DEFAULTS: dict[str, str] = {
     "google": "gemini-3-flash",
 }
 
+# Codex CLI model surface. Independent of PROVIDER_MODELS["openai"]:
+# codex CLI exposes a different set than the OpenAI HTTP API surface
+# goose drives, and treating them as one list lets a goose-only
+# model (e.g. gpt-5.4-nano) leak onto a codex install where the CLI
+# rejects it. Refresh when the codex CLI bumps; no auto-discovery.
+CODEX_MODELS: dict[str, str] = {
+    "gpt-5.5": "\U0001f7e2 GPT-5.5",
+    "gpt-5.4": "\U0001f7e1 GPT-5.4",
+    "gpt-5.4-mini": "\U0001f535 GPT-5.4 Mini",
+    "gpt-5.3-codex": "\U0001f7e0 GPT-5.3 Codex",
+    "gpt-5.3-codex-spark": "⚡ GPT-5.3 Codex Spark",
+    "gpt-5.2": "\U0001f7e4 GPT-5.2",
+}
+
+# Codex's default model when DEFAULT_MODEL is unset on a codex install.
+# Independent of PROVIDER_DEFAULTS["openai"] (goose-on-openai still
+# consults that constant; shifting it would change goose's default).
+CODEX_DEFAULT_MODEL = "gpt-5.5"
+
 # Providers that accept arbitrary model IDs with no curated list.
 # These show a text-based UI instead of an inline keyboard in bot.py.
 OPEN_ENDED_PROVIDERS: frozenset[str] = frozenset({"openrouter", "ollama"})
 
-# Union of all model keys from curated providers. Used for workspace
-# config validation where the provider is unknown (workspaces can be
-# used by users on different providers).
-_ALL_CURATED_MODELS: frozenset[str] = frozenset(model for models in PROVIDER_MODELS.values() for model in models)
+# Union of all model keys from curated surfaces. Used for workspace
+# config validation where the active backend is unknown at load time
+# (workspaces can be used by users on different backends/providers).
+# Includes CODEX_MODELS so codex-only IDs like gpt-5.5 are accepted
+# in workspaces.yaml; each backend's change_workspace decides whether
+# to actually USE the override for its surface.
+_ALL_CURATED_MODELS: frozenset[str] = frozenset(
+    list(model for models in PROVIDER_MODELS.values() for model in models) + list(CODEX_MODELS.keys())
+)
 
 
 # ── Per-role model registry ──────────────────────────────────────────
@@ -167,7 +191,13 @@ MODEL_REGISTRY: dict[tuple[str, ModelRole], str] = {
     ("claude", ModelRole.BEHAVIORAL_GEN): "sonnet",
     ("codex", ModelRole.PR_REVIEW): "gpt-5.4-mini",
     ("codex", ModelRole.ISSUE_TRIAGE): "gpt-5.4-mini",
-    ("codex", ModelRole.BEHAVIORAL_JUDGE): "gpt-5.4-nano",
+    # gpt-5.4-mini for the judge role: the closest analog to the
+    # claude haiku tier (small, fast, cheap). gpt-5.4-nano would have
+    # matched the editorial "cheaper than mini" intent but the codex
+    # CLI does not expose it, so it would fail at first behavioral
+    # eval. _check_model_registry_complete validates registry rows
+    # against CODEX_MODELS so future drift gets caught at startup.
+    ("codex", ModelRole.BEHAVIORAL_JUDGE): "gpt-5.4-mini",
     ("codex", ModelRole.BEHAVIORAL_GEN): "gpt-5.4-mini",
 }
 
@@ -205,12 +235,14 @@ def get_model_for(role: ModelRole, backend: str, override: str = "") -> str:
 
 def _check_model_registry_complete(backend: str) -> None:
     """
-    Verify MODEL_REGISTRY has a row for every role the active backend uses.
+    Verify MODEL_REGISTRY has a row for every role the active backend uses,
+    AND that each codex row names a model the codex CLI actually exposes.
 
-    Runs once at load_config() time. Raises SystemExit on a missing
-    row so the bug surfaces at startup rather than at a per-request
-    LookupError (which would otherwise crash a single agent invocation
-    silently if a future role were added without its registry rows).
+    Runs once at load_config() time. Raises SystemExit on a missing or
+    invalid row so the bug surfaces at startup rather than at a per-
+    request LookupError (which would otherwise crash a single agent
+    invocation silently if a future role were added without its
+    registry rows, or with a codex-incompatible model).
 
     Goose is exempt: goose-side model resolution lives in module-level
     _GOOSE_AGENT_MODELS dicts that this registry does not subsume.
@@ -223,16 +255,42 @@ def _check_model_registry_complete(backend: str) -> None:
         raise SystemExit(
             f"MODEL_REGISTRY is missing rows for backend '{backend}': {names}. Update MODEL_REGISTRY in config.py."
         )
+    # Validate codex rows against the CLI's actual model surface so a
+    # future drift (operator updates CODEX_MODELS without touching
+    # MODEL_REGISTRY, or vice versa) fails fast at startup rather
+    # than at the first behavioral / triage / review run.
+    if backend == "codex":
+        invalid = [
+            (role, MODEL_REGISTRY[(backend, role)])
+            for role in ModelRole
+            if MODEL_REGISTRY[(backend, role)] not in CODEX_MODELS
+        ]
+        if invalid:
+            valid_list = ", ".join(sorted(CODEX_MODELS.keys()))
+            details = ", ".join(f"{role.value}={model}" for role, model in invalid)
+            raise SystemExit(
+                f"MODEL_REGISTRY has codex rows naming models the codex CLI does not expose: {details}. "
+                f"Valid codex models: {valid_list}. Update MODEL_REGISTRY in config.py."
+            )
 
 
 def get_effective_provider(backend: str, llm_provider: str) -> str:
     """Derive the effective provider from backend + llm_provider.
 
-    The Claude backend always uses Anthropic models. All other
-    backends use whatever provider is configured.
+    Claude is always anthropic; codex is always openai (codex CLI has
+    no other provider surface, so a wizard-generated codex install with
+    LLM_PROVIDER unset still needs the runtime to know its provider is
+    openai). Goose is the only backend that consults the raw
+    llm_provider, because it routes to whatever provider the user
+    configured. Kept identical to the backend->provider rule
+    get_user_backend_and_provider uses so the two cascade helpers do
+    not drift; any caller resolving an effective provider for a
+    backend gets the same answer regardless of which helper it uses.
     """
     if backend == "claude":
         return "anthropic"
+    if backend == "codex":
+        return "openai"
     return llm_provider
 
 
@@ -263,6 +321,9 @@ def validate_model_for_provider(model: str, provider: str) -> bool:
     (not in PROVIDER_MODELS or OPEN_ENDED_PROVIDERS) are accepted with
     a warning - this catches the case where VALID_PROVIDERS gains
     a new entry but PROVIDER_MODELS was not updated to match.
+
+    Backend-aware callers should use `validate_model_for_backend`. This
+    function stays as the implementation goose / claude delegate to.
     """
     if provider in OPEN_ENDED_PROVIDERS:
         return True
@@ -279,6 +340,61 @@ def validate_model_for_provider(model: str, provider: str) -> bool:
             )
         return True
     return model in models
+
+
+def validate_model_for_backend(model: str, backend: str, eff_provider: str) -> bool:
+    """Check if a model is valid for the active backend.
+
+    Codex installs validate against CODEX_MODELS only - no fallback to
+    PROVIDER_MODELS["openai"] or any other provider surface. The
+    backend determines the model surface 1:1 for codex (which speaks
+    its own CLI's curated set); other backends delegate to the existing
+    provider-only validator, which is unchanged for goose / claude.
+
+    Canonical model validator: every model-selection site in the
+    codebase routes through this function so codex and goose share
+    no fallback path.
+    """
+    if backend == "codex":
+        return model in CODEX_MODELS
+    return validate_model_for_provider(model, eff_provider)
+
+
+def models_for_backend(agent_backend: str, eff_provider: str) -> dict[str, str] | None:
+    """Curated model list for the given (backend, provider) pair.
+
+    Codex consults its own CODEX_MODELS surface; everything else falls
+    back to PROVIDER_MODELS[eff_provider]. Returns None for open-ended
+    providers (caller falls back to a free-text prompt rather than a
+    fixed-choice keyboard). Used by both install.py (wizard prompt +
+    apply-time validator) and bot.py (/model keyboard + selection
+    validator).
+    """
+    if agent_backend == "codex":
+        return CODEX_MODELS
+    if eff_provider in OPEN_ENDED_PROVIDERS:
+        return None
+    return PROVIDER_MODELS.get(eff_provider)
+
+
+def get_user_backend_and_provider(user_config: "UserConfig | None", config: "Config") -> tuple[str, str]:
+    """Resolve (backend, provider) for a chat_id with the per-user cascade.
+
+    Pool.py and bot.py already implement this cascade (user.agent_backend
+    > config.agent_backend, similar for llm_provider); this function
+    consolidates it in one place so every runtime model-validation site
+    sees the same effective backend for a given user. Backend determines
+    provider 1:1 for codex (openai) and claude (anthropic); goose's
+    provider comes from the same cascade as its backend.
+    """
+    backend = user_config.agent_backend if user_config and user_config.agent_backend else config.agent_backend
+    if backend == "claude":
+        provider = "anthropic"
+    elif backend == "codex":
+        provider = "openai"
+    else:
+        provider = user_config.llm_provider if user_config and user_config.llm_provider else config.llm_provider
+    return backend, provider
 
 
 # Maximum context window size in tokens. Claude's hard ceiling.
@@ -1257,15 +1373,22 @@ def _load_user_configs(
                 eff_provider,
             )
 
-        # Validate optional model against the user's effective provider.
+        # Validate optional model against the user's effective backend.
+        # Codex installs consult CODEX_MODELS; other backends consult
+        # PROVIDER_MODELS[eff_provider] via the provider-only delegate.
         # Cascade: user override -> global config, same as pool.py.
-        if model is not None and not validate_model_for_provider(model, eff_provider):
-            valid = sorted(PROVIDER_MODELS.get(eff_provider, {}).keys())
+        if model is not None and not validate_model_for_backend(model, eff_backend, eff_provider):
+            if eff_backend == "codex":
+                valid = sorted(CODEX_MODELS.keys())
+                surface_label = "codex"
+            else:
+                valid = sorted(PROVIDER_MODELS.get(eff_provider, {}).keys())
+                surface_label = f"provider '{eff_provider}'"
             log.warning(
-                "users.yaml: invalid model '%s' for %s (provider '%s', must be one of %s); ignoring",
+                "users.yaml: invalid model '%s' for %s (%s, must be one of %s); ignoring",
                 model,
                 name,
-                eff_provider,
+                surface_label,
                 valid,
             )
             model = None
@@ -1570,11 +1693,27 @@ def load_config() -> Config:
                 log.warning("ALLOWED_WORKSPACES: skipping non-existent path: %s", p)
 
     # Validate numeric config - fail fast with clear messages rather than
-    # cryptic ValueError tracebacks from int()/float() on bad input
+    # cryptic ValueError tracebacks from int()/float() on bad input.
+    # AGENT_TIMEOUT_SECONDS is the canonical key; CLAUDE_TIMEOUT_SECONDS
+    # is a legacy alias kept for installs upgrading without re-running
+    # the wizard. Apply-time migration in install.py rewrites
+    # /etc/kai/env to the new key, so the legacy fallback only fires
+    # on the first start after the upgrade.
+    raw_timeout = os.environ.get("AGENT_TIMEOUT_SECONDS", "").strip()
+    if not raw_timeout:
+        legacy_timeout = os.environ.get("CLAUDE_TIMEOUT_SECONDS", "").strip()
+        if legacy_timeout:
+            log.warning(
+                "CLAUDE_TIMEOUT_SECONDS is deprecated; use AGENT_TIMEOUT_SECONDS. "
+                "Re-run 'make install' to migrate /etc/kai/env automatically."
+            )
+            raw_timeout = legacy_timeout
+        else:
+            raw_timeout = "120"
     try:
-        claude_timeout_seconds = int(os.environ.get("CLAUDE_TIMEOUT_SECONDS", "120"))
+        claude_timeout_seconds = int(raw_timeout)
     except ValueError:
-        raise SystemExit("CLAUDE_TIMEOUT_SECONDS must be an integer") from None
+        raise SystemExit("AGENT_TIMEOUT_SECONDS must be an integer") from None
     # Budget ceiling: new var takes precedence, fall back to old var
     # for backward compat on upgrade (existing .env has old key name).
     raw_ceiling = os.environ.get("BUDGET_CEILING", "").strip()
@@ -1948,11 +2087,18 @@ def load_config() -> Config:
     if os.environ.get("CLAUDE_MODEL") and not os.environ.get("DEFAULT_MODEL"):
         log.warning("CLAUDE_MODEL is deprecated, use DEFAULT_MODEL instead")
 
-    # Validate DEFAULT_MODEL against the effective global provider.
-    # Catches typos at startup instead of letting them propagate to
-    # a confusing runtime failure.
+    # Validate DEFAULT_MODEL against the effective global backend.
+    # Codex installs validate against CODEX_MODELS only - no fallback
+    # to PROVIDER_MODELS["openai"]. Other backends still use the
+    # provider-only validator. Catches typos at startup instead of
+    # letting them propagate to a confusing runtime failure.
     global_provider = get_effective_provider(agent_backend, llm_provider)
-    if not validate_model_for_provider(default_model, global_provider):
+    if not validate_model_for_backend(default_model, agent_backend, global_provider):
+        if agent_backend == "codex":
+            valid = sorted(CODEX_MODELS.keys())
+            raise SystemExit(
+                f"DEFAULT_MODEL '{default_model}' is not valid for codex (must be one of: {', '.join(valid)})"
+            )
         valid = sorted(PROVIDER_MODELS.get(global_provider, {}).keys())
         raise SystemExit(
             f"DEFAULT_MODEL '{default_model}' is not valid for provider "

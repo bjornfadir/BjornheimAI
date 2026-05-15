@@ -12,6 +12,7 @@ import pytest
 from kai.triage import (
     _GOOSE_AGENT_MODELS,
     IssueMetadata,
+    _extract_codex_text,
     _parse_triage_json,
     _resolve_goose_model,
     _sanitize_search_query,
@@ -649,6 +650,285 @@ class TestRunTriageGoose:
         """Goose backend with empty provider raises ValueError early."""
         with pytest.raises(ValueError, match="provider is empty"):
             await run_triage("prompt", agent_backend="goose", provider="")
+
+
+class TestRunTriageCodex:
+    """
+    Tests for the codex branch of run_triage.
+
+    The codex branch invokes `codex exec --json` and parses NDJSON
+    output via _extract_codex_text. No sudo wrap; subscription auth
+    uses the service user's own ~/.codex/auth.json.
+    """
+
+    @staticmethod
+    def _codex_ndjson(text: str) -> str:
+        """
+        Build a minimal NDJSON stream that _extract_codex_text resolves
+        to the given final text. Uses the "content" list-of-blocks
+        shape (the JSON-RPC convention goose ACP uses) since the
+        actual codex schema is not yet pinned.
+        """
+        events = [
+            {"event": "thread.started"},
+            {"event": "turn.started"},
+            {
+                "event": "item.message.completed",
+                "content": [{"type": "text", "text": text}],
+            },
+            {"event": "turn.completed"},
+        ]
+        return "\n".join(json.dumps(e) for e in events) + "\n"
+
+    @pytest.mark.asyncio
+    async def test_codex_argv_uses_codex_exec(self):
+        """
+        Argv is `codex exec --json --model <model>`, never claude or
+        goose. Locks the "no overlap" guarantee at the subprocess
+        boundary: the codex triage branch never spawns claude.
+        """
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson('{"labels": []}'))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            await run_triage("prompt", agent_backend="codex")
+        cmd = mock_exec.call_args[0]
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+        assert "--json" in cmd
+        assert "--print" not in cmd  # No claude flag
+
+    @pytest.mark.asyncio
+    async def test_codex_argv_uses_registry_model(self):
+        """
+        With agent_backend=codex and no env override, the --model argv
+        slot matches the registry's (codex, ISSUE_TRIAGE) row
+        ("gpt-5.4-mini"). Locks the registry as the source of truth
+        for the codex side.
+        """
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson("{}"))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            await run_triage("prompt", agent_backend="codex")
+        cmd = mock_exec.call_args[0]
+        i = cmd.index("--model")
+        assert cmd[i + 1] == "gpt-5.4-mini"
+
+    @pytest.mark.asyncio
+    async def test_codex_env_override_honored_at_call_site(self, monkeypatch):
+        """
+        ISSUE_TRIAGE_MODEL_CODEX in the environment overrides the
+        registry value at the call site. Same end-to-end env-override
+        wiring as the claude path.
+        """
+        monkeypatch.setenv("ISSUE_TRIAGE_MODEL_CODEX", "gpt-5.4")
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson("{}"))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            await run_triage("prompt", agent_backend="codex")
+        cmd = mock_exec.call_args[0]
+        i = cmd.index("--model")
+        assert cmd[i + 1] == "gpt-5.4"
+
+    @pytest.mark.asyncio
+    async def test_codex_no_sudo_even_with_claude_user(self):
+        """
+        claude_user is a claude-specific sudo argument. The codex
+        branch ignores it; argv must NOT contain "sudo".
+        """
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson("{}"))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            await run_triage("prompt", agent_backend="codex", claude_user="some-user")
+        cmd = mock_exec.call_args[0]
+        assert "sudo" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_codex_no_max_budget_flag(self):
+        """
+        --max-budget-usd is not emitted on the codex branch. Codex on
+        subscription auth has no per-call billing; runaway protection
+        comes from the asyncio.wait_for timeout. Mirror of the existing
+        claude-side absence assertion.
+        """
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson("{}"))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            await run_triage("prompt", agent_backend="codex")
+        cmd = mock_exec.call_args[0]
+        assert "--max-budget-usd" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_codex_extracts_final_text_from_ndjson(self):
+        """
+        Return value is the agent message text extracted from the
+        NDJSON event stream, not the raw stdout. The downstream
+        _parse_triage_json receives a single JSON object, not
+        multi-line NDJSON.
+        """
+        expected_json = '{"labels": ["bug"], "summary": "A bug."}'
+        mock_proc = _mock_subprocess(stdout=self._codex_ndjson(expected_json))
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await run_triage("prompt", agent_backend="codex")
+        # _extract_codex_text strips, so the result is the expected
+        # JSON string with no leading/trailing whitespace.
+        assert result == expected_json
+
+    @pytest.mark.asyncio
+    async def test_codex_subprocess_failure_raises(self):
+        """Non-zero exit from codex raises RuntimeError with stderr."""
+        mock_proc = _mock_subprocess(returncode=1, stderr="auth failed")
+        with (
+            patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc),
+            pytest.raises(RuntimeError, match="auth failed"),
+        ):
+            await run_triage("prompt", agent_backend="codex")
+
+    @pytest.mark.asyncio
+    async def test_codex_handles_streaming_deltas_plus_terminal(self):
+        """
+        End-to-end through run_triage: a stream that contains both
+        delta chunks AND a terminal consolidated message returns the
+        terminal JSON exactly once, parseable by _parse_triage_json.
+
+        This is the integration counterpart to
+        TestExtractCodexText::test_terminal_text_wins_over_accumulated_deltas.
+        Without the terminal-wins rule, the triage path would return
+        a doubled JSON string (`{"labels":[]}{"labels":[]}`) and the
+        downstream parser would fail on every codex run that streams.
+        """
+        expected_json = '{"labels": ["bug"], "summary": "ok"}'
+        events = [
+            {"event": "delta", "delta": {"text": '{"labels":'}},
+            {"event": "delta", "delta": {"text": ' ["bug"], "summary": "ok"}'}},
+            {
+                "event": "item.message.completed",
+                "item": {"content": [{"type": "text", "text": expected_json}]},
+            },
+        ]
+        stream = "\n".join(json.dumps(e) for e in events) + "\n"
+        mock_proc = _mock_subprocess(stdout=stream)
+        with patch("kai.triage.asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await run_triage("prompt", agent_backend="codex")
+        # Exactly the terminal JSON, not deltas + terminal concatenated.
+        assert result == expected_json
+
+
+class TestExtractCodexText:
+    """
+    Unit tests for the _extract_codex_text NDJSON parser.
+
+    The codex CLI schema is not yet pinned by smoke test; the parser
+    accepts multiple field paths (top-level "text"; "content" as
+    string or list-of-blocks; "delta.text"; "item.content") so a
+    schema variant the docs do not describe still yields the agent
+    message. These tests lock each path independently.
+    """
+
+    def test_empty_input(self):
+        """An empty stream returns the empty string."""
+        assert _extract_codex_text("") == ""
+
+    def test_skips_non_json_lines(self):
+        """Non-JSON lines are silently skipped."""
+        stream = "not-json\n" + json.dumps({"text": "hello"}) + "\n"
+        assert _extract_codex_text(stream) == "hello"
+
+    def test_extracts_top_level_text(self):
+        """Events with a top-level 'text' field contribute that string."""
+        stream = json.dumps({"event": "delta", "text": "abc"}) + "\n"
+        assert _extract_codex_text(stream) == "abc"
+
+    def test_extracts_delta_text(self):
+        """Events with 'delta.text' (alternate streaming shape) work."""
+        stream = json.dumps({"event": "delta", "delta": {"text": "abc"}}) + "\n"
+        assert _extract_codex_text(stream) == "abc"
+
+    def test_extracts_content_string(self):
+        """Events with 'content' as a string contribute that string."""
+        stream = json.dumps({"event": "msg", "content": "hello"}) + "\n"
+        assert _extract_codex_text(stream) == "hello"
+
+    def test_extracts_content_list_of_text_blocks(self):
+        """Events with 'content' as a list of {type:text, text:...} blocks work."""
+        event = {
+            "event": "msg",
+            "content": [
+                {"type": "text", "text": "part-A"},
+                {"type": "text", "text": " part-B"},
+            ],
+        }
+        stream = json.dumps(event) + "\n"
+        assert _extract_codex_text(stream) == "part-A part-B"
+
+    def test_extracts_item_content(self):
+        """Events with text inside 'item.content[...]' work."""
+        event = {"event": "item.message.completed", "item": {"content": [{"type": "text", "text": "from item"}]}}
+        stream = json.dumps(event) + "\n"
+        assert _extract_codex_text(stream) == "from item"
+
+    def test_ignores_unknown_event_types(self):
+        """An event with no recognizable text payload contributes nothing."""
+        stream = json.dumps({"event": "thread.started", "metadata": {"foo": "bar"}}) + "\n"
+        assert _extract_codex_text(stream) == ""
+
+    def test_accumulates_across_events(self):
+        """Text from multiple events accumulates in order."""
+        events = [
+            {"event": "delta", "text": "Hello"},
+            {"event": "delta", "text": " "},
+            {"event": "delta", "text": "world"},
+        ]
+        stream = "\n".join(json.dumps(e) for e in events) + "\n"
+        assert _extract_codex_text(stream) == "Hello world"
+
+    def test_strips_outer_whitespace(self):
+        """The accumulated result has leading/trailing whitespace stripped."""
+        stream = json.dumps({"text": "  hello  "}) + "\n"
+        assert _extract_codex_text(stream) == "hello"
+
+    def test_terminal_text_wins_over_accumulated_deltas(self):
+        """
+        A stream with both delta chunks and a terminal consolidated
+        message returns the terminal text exactly once, NOT the
+        deltas concatenated with the terminal.
+
+        Without the terminal-wins rule, the parser would yield
+        `"HelloHello"` for the worked example below: triage's JSON
+        parser then fails because `{"labels":[]}{"labels":[]}` is
+        not a single JSON object, breaking the triage path on
+        every codex run that streams. This regression guard
+        protects against a future refactor that re-introduces
+        accumulate-across-representations.
+        """
+        events = [
+            {"event": "delta", "delta": {"text": "Hel"}},
+            {"event": "delta", "delta": {"text": "lo"}},
+            {"event": "item.message.completed", "item": {"content": [{"type": "text", "text": "Hello"}]}},
+        ]
+        stream = "\n".join(json.dumps(e) for e in events) + "\n"
+        assert _extract_codex_text(stream) == "Hello"
+
+    def test_last_terminal_wins_on_multiple_terminals(self):
+        """
+        When a stream emits more than one terminal/complete event
+        (e.g. an interim consolidated text followed by a final one),
+        the most recent terminal text wins. Mirrors the streaming
+        convention that "completed" supersedes prior partials.
+        """
+        events = [
+            {"item": {"content": [{"type": "text", "text": "first"}]}},
+            {"item": {"content": [{"type": "text", "text": "final"}]}},
+        ]
+        stream = "\n".join(json.dumps(e) for e in events) + "\n"
+        assert _extract_codex_text(stream) == "final"
+
+    def test_deltas_only_when_no_terminal(self):
+        """
+        With no terminal event, delta chunks accumulate as the result.
+        Locks the fallback behavior the terminal-wins rule does not
+        short-circuit when no terminal text was emitted.
+        """
+        events = [
+            {"event": "delta", "delta": {"text": "Hel"}},
+            {"event": "delta", "delta": {"text": "lo"}},
+        ]
+        stream = "\n".join(json.dumps(e) for e in events) + "\n"
+        assert _extract_codex_text(stream) == "Hello"
 
 
 class TestResolveGooseModelTriage:

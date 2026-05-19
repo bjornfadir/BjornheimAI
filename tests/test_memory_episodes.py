@@ -138,6 +138,20 @@ def _stage2_envelope(episode: dict | None = None, *, cost_usd: float = 0.04) -> 
 
 
 @pytest.fixture(autouse=True)
+def _mock_binary_resolver(monkeypatch):
+    """Pin the binary resolver so the reasoner argv builders do not
+    require claude/codex on PATH at test time. Same pattern as the
+    autouse fixtures in test_memory_extraction.py and test_oneshot.py;
+    the stage-2 tests in this file exercise the reasoner through
+    extract_and_store and rely on the underlying subprocess mock
+    rather than the binary resolution itself."""
+    monkeypatch.setattr(
+        "kai.oneshot.resolve_oneshot_binary",
+        lambda backend: "claude" if backend == "claude" else "codex",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_episode_state():
     """Clear stage-2 module state between tests.
 
@@ -1199,8 +1213,8 @@ class TestRunEpisodeExtractorWithCodexEnvelope:
             ep, cost_usd, reason = await _run_episode_extractor("payload", config)
 
         assert ep == episode
-        # No total_cost_usd in the envelope -> 0.0 (matches the codex
-        # subscription-auth posture; pay-per-token codex deployments
-        # will populate this differently if they ever land).
+        # No total_cost_usd in the envelope -> 0.0. Codex runs
+        # subscription-backed in the supported deployment model, so
+        # the cost field is informational and reads as zero.
         assert cost_usd == 0.0
         assert reason is None

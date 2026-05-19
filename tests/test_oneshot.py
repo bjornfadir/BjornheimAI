@@ -42,6 +42,57 @@ def _current_user() -> str:
     return pwd.getpwuid(os.getuid()).pw_name
 
 
+@pytest.fixture(autouse=True)
+def _mock_binary_resolver():
+    """Pin the binary resolver to literal backend names so existing
+    argv-shape assertions stay valid across host machines. Tests that
+    care about resolver behavior itself (e.g. CODEX_BIN override
+    validation) patch over this fixture with their own values."""
+
+    def fake_resolve(backend: str) -> str:
+        if backend == "claude":
+            return "claude"
+        if backend == "codex":
+            return "codex"
+        raise ValueError(f"unknown backend: {backend!r}")
+
+    with patch("kai.oneshot.resolve_oneshot_binary", side_effect=fake_resolve):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _bypass_codex_routing_for_argv_tests(request):
+    """The codex reasoner now refuses to spawn under the bot user
+    (same-user routing rejected on the codex branch). The existing
+    argv/env/schema/output tests in this file use `os_user=_current_user()`
+    so resolve_claude_user short-circuits to None (the historical
+    test-friendly self-sudo-skip path), which is no longer valid for
+    codex.
+
+    To keep the surface those tests check (argv flag layout, env
+    allow-list, stdin payload, JSON parsing) without each test having
+    to wire a sudo-wrap shim, this autouse fixture:
+
+      - makes resolve_claude_user a pass-through (so the same-user
+        refusal does not fire on os_user=_current_user())
+      - makes _wrap_cmd_for_user a no-op (so the argv assertions that
+        expect cmd[0] == "codex" stay valid; the wrap is exercised
+        explicitly by the tests marked `routing_test` below)
+
+    Tests that exercise real routing behavior (the routing classes,
+    the same-user refusal test, etc.) are marked with
+    `@pytest.mark.routing_test` and opt out of this bypass so they
+    can assert against the production wrap shape and refusal."""
+    if request.node.get_closest_marker("routing_test"):
+        yield
+        return
+    with (
+        patch("kai.oneshot.resolve_claude_user", side_effect=lambda u: u if u else None),
+        patch("kai.oneshot._wrap_cmd_for_user", side_effect=lambda cmd, *a, **kw: cmd),
+    ):
+        yield
+
+
 def _make_proc(
     *,
     stdout: bytes = b"",
@@ -435,12 +486,28 @@ class TestCodexOneShotReasonerArgv:
     @pytest.mark.asyncio
     async def test_argv_honors_codex_bin_env(self, tmp_path, monkeypatch):
         """CODEX_BIN must override the bare `codex` resolution so
-        per-os_user homebrew installs work without PATH munging."""
-        monkeypatch.setenv("CODEX_BIN", "/custom/path/to/codex")
+        per-os_user homebrew installs work without PATH munging.
+        Bypasses the autouse resolver mock to exercise the real
+        resolver path; the test points CODEX_BIN at an executable
+        file in tmp_path so the resolver's is-file + executable
+        checks pass."""
+        fake_codex = tmp_path / "codex-bin"
+        fake_codex.write_text("#!/bin/sh\nexit 0\n")
+        fake_codex.chmod(0o755)
+        monkeypatch.setenv("CODEX_BIN", str(fake_codex))
+        # Bypass the autouse fixture for this single test by patching
+        # the real resolver back into place. The autouse fixture pins
+        # to literal "codex"; here we want the real CODEX_BIN
+        # honoring behavior to ground the assertion.
+        from kai.oneshot_binary import resolve_oneshot_binary as real_resolver
+
         reasoner = CodexOneShotReasoner(cwd=tmp_path, os_user=_current_user())
         proc = _make_proc(stdout=_codex_envelope_ndjson({"ok": True}))
 
-        with patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)) as mock_exec:
+        with (
+            patch("kai.oneshot.resolve_oneshot_binary", side_effect=real_resolver),
+            patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)) as mock_exec,
+        ):
             await reasoner.run(
                 prompt="p",
                 purpose="fact_extraction",
@@ -448,7 +515,7 @@ class TestCodexOneShotReasonerArgv:
             )
 
         cmd = mock_exec.call_args[0]
-        assert cmd[0] == "/custom/path/to/codex"
+        assert cmd[0] == str(fake_codex)
 
     @pytest.mark.asyncio
     async def test_argv_omits_output_schema_without_schema(self, tmp_path):
@@ -620,9 +687,17 @@ class TestCodexOneShotReasonerSchemaFile:
         captured: dict = {}
 
         def _capture(*args, **kwargs):
-            i = args.index("--output-schema")
-            captured["path"] = Path(args[i + 1])
-            return _make_proc(raise_timeout=True)
+            # Multiple subprocess spawns may fire on the timeout
+            # path: the codex run itself, and the cross-user kill
+            # tree. Only the first carries --output-schema; the
+            # kill subprocess's argv is the sudo+kill shape.
+            if "--output-schema" in args:
+                i = args.index("--output-schema")
+                captured["path"] = Path(args[i + 1])
+                return _make_proc(raise_timeout=True)
+            # Kill subprocess: return a noop mock so the kill helper
+            # awaits and returns cleanly.
+            return _make_proc()
 
         with (
             patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(side_effect=_capture)),
@@ -739,9 +814,20 @@ class TestCodexOneShotReasonerTimeout:
     async def test_timeout_kills_and_awaits_then_raises(self, tmp_path):
         reasoner = CodexOneShotReasoner(cwd=tmp_path, os_user=_current_user())
         proc = _make_proc(raise_timeout=True)
+        # The cross-user kill path also spawns a subprocess (sudo
+        # /bin/kill -KILL -<pgid>). Returning the same timing-out
+        # proc for that spawn would have proc.kill called twice.
+        # Differentiate on argv: the kill subprocess starts with
+        # "sudo" + "-n", the reasoner spawn starts differently.
+        kill_proc = _make_proc()
+
+        def _route(*args, **kwargs):
+            if args and args[0] == "sudo" and len(args) > 1 and args[1] == "-n":
+                return kill_proc
+            return proc
 
         with (
-            patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(side_effect=_route)),
             pytest.raises(OneShotTimeout),
         ):
             await reasoner.run(
@@ -1102,9 +1188,10 @@ class TestCodexOneShotReasonerLogging:
         # Schema-backed success is the production memory path; the
         # routing log field must be present so operator-side log
         # review can confirm the subprocess ran under the intended
-        # OS user. `os_user=self` here because the direct-spawn
-        # self-sudo-skip case is what `_current_user()` triggers.
-        assert "os_user=self" in msg
+        # OS user. Under the autouse bypass, resolve_claude_user
+        # passes the os_user through unchanged (no longer treated as
+        # self-sudo-skip), so the field carries the actual user name.
+        assert f"os_user={_current_user()}" in msg
 
     @pytest.mark.asyncio
     async def test_log_line_carries_target_os_user_on_wrapped_success(self, tmp_path, caplog):
@@ -1160,6 +1247,7 @@ class TestCodexOneShotReasonerLogging:
 # ── Per-user OS routing (issue #503) ────────────────────────────────
 
 
+@pytest.mark.routing_test
 class TestRoutingArgvAndPreserveEnv:
     """`os_user` constructor argument controls the sudo wrap.
 
@@ -1209,17 +1297,35 @@ class TestRoutingArgvAndPreserveEnv:
         assert mock_exec.call_args.kwargs["start_new_session"] is True
 
     @pytest.mark.asyncio
-    async def test_codex_direct_spawn_when_os_user_is_current(self, tmp_path):
+    async def test_codex_refuses_same_user_spawn(self, tmp_path):
+        """Codex memory MUST NOT run as the bot user. The
+        construction-level None case is already refused; this test
+        pins the same-user case (os_user resolves to the current
+        process user). The refusal fires BEFORE the subprocess
+        spawn so no codex process ever starts under the bot
+        identity.
+
+        Replaces the historical direct-spawn behavior pinned by the
+        prior `test_codex_direct_spawn_when_os_user_is_current`
+        test. The old behavior contradicted the safety claim in
+        CodexOneShotReasoner.run() and the operator's standing
+        kai/daniel separation policy: codex running as the bot
+        user would have access to /etc/kai/env and other bot-only
+        state through sudoers."""
         reasoner = CodexOneShotReasoner(cwd=tmp_path, os_user=_current_user())
-        proc = _make_proc(stdout=b"")
+        spawn_called = []
+
+        async def fail_exec(*args, **kwargs):
+            spawn_called.append(args)
+            raise AssertionError("subprocess must not spawn on the same-user refusal path")
+
         with (
-            patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)) as mock_exec,
-            pytest.raises(OneShotOutputError),
+            patch("kai.oneshot.asyncio.create_subprocess_exec", side_effect=fail_exec),
+            pytest.raises(OneShotRoutingError) as exc,
         ):
             await reasoner.run(prompt="p", purpose="fact_extraction", json_schema={"type": "object"})
-        cmd = mock_exec.call_args[0]
-        assert "sudo" not in cmd
-        assert mock_exec.call_args.kwargs["start_new_session"] is False
+        assert "same-user spawn" in str(exc.value)
+        assert spawn_called == []
 
     @pytest.mark.asyncio
     async def test_codex_wraps_with_preserve_env(self, tmp_path):
@@ -1245,6 +1351,7 @@ class TestRoutingArgvAndPreserveEnv:
         assert mock_exec.call_args.kwargs["start_new_session"] is True
 
 
+@pytest.mark.routing_test
 class TestRoutingRefusal:
     """Codex with `os_user=None` refuses to run; Claude does not.
 
@@ -1282,6 +1389,7 @@ class TestRoutingRefusal:
         assert "sudo" not in cmd
 
 
+@pytest.mark.routing_test
 class TestRoutingTimeoutCleanup:
     """On timeout from a wrapped spawn, the cross-user kill goes
     out BEFORE the wrapper reap. Negative-PGID covers the whole
@@ -1435,6 +1543,7 @@ class TestCwdAndSchemaModes:
         assert captured["mode"] == 0o644
 
 
+@pytest.mark.routing_test
 class TestRoutingLogField:
     """Every outcome line carries `os_user=<target>` or `os_user=self`."""
 
@@ -1462,6 +1571,93 @@ class TestRoutingLogField:
             await reasoner.run(prompt="p", purpose="fact_extraction")
         msg = next(r.getMessage() for r in caplog.records if r.message.startswith("oneshot_reasoner"))
         assert "os_user=self" in msg
+
+
+# ── Binary resolver integration ─────────────────────────────────────
+
+
+class TestBinaryResolverIntegration:
+    """Both reasoners must convert leaf-module `BinaryResolutionError`
+    into `OneShotRoutingError` so the existing `memory_extraction`
+    catch surface (`except OneShotError`) stays unchanged. Also
+    confirms `OneShotResult.raw_metadata` carries `cmd` plus
+    `resolved_binary` so the smoke command can ground its output in
+    the subprocess boundary rather than re-resolving the binary."""
+
+    @pytest.mark.asyncio
+    async def test_claude_raises_routing_error_on_binary_unreachable(self, tmp_path):
+        """Claude argv builder catches BinaryResolutionError and
+        re-raises as OneShotRoutingError with the leaf-module
+        message preserved. `memory_extraction` already catches
+        OneShotError; the rewrap keeps its catch surface unchanged."""
+        from kai.oneshot_binary import BinaryResolutionError
+
+        reasoner = ClaudeOneShotReasoner(cwd=tmp_path)
+
+        def boom(_backend: str) -> str:
+            raise BinaryResolutionError("could not resolve claude binary: `claude` not on PATH")
+
+        with (
+            patch("kai.oneshot.resolve_oneshot_binary", side_effect=boom),
+            pytest.raises(OneShotRoutingError) as exc,
+        ):
+            await reasoner.run(prompt="p", purpose="fact_extraction")
+        assert "claude binary" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_codex_raises_routing_error_on_binary_unreachable(self, tmp_path):
+        """Codex argv builder mirrors the claude branch: catch
+        BinaryResolutionError, re-raise as OneShotRoutingError."""
+        from kai.oneshot_binary import BinaryResolutionError
+
+        reasoner = CodexOneShotReasoner(cwd=tmp_path, os_user=_current_user())
+
+        def boom(_backend: str) -> str:
+            raise BinaryResolutionError("could not resolve codex binary: CODEX_BIN unset, `codex` not on PATH")
+
+        with (
+            patch("kai.oneshot.resolve_oneshot_binary", side_effect=boom),
+            pytest.raises(OneShotRoutingError) as exc,
+        ):
+            await reasoner.run(prompt="p", purpose="fact_extraction")
+        assert "codex binary" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_claude_raw_metadata_carries_cmd_and_resolved_binary(self, tmp_path):
+        """OneShotResult.raw_metadata must carry `cmd` (full argv,
+        including any sudo prefix on cross-user routing) and
+        `resolved_binary` (pre-sudo agent path). Smoke prints
+        resolved_binary so the operator-visible answer is correct
+        under cross-user wrapping."""
+        reasoner = ClaudeOneShotReasoner(cwd=tmp_path)
+        proc = _make_proc(stdout=b'{"ok": true}')
+        with patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await reasoner.run(
+                prompt="hello",
+                model="claude-haiku-4-5",
+                timeout=30,
+                purpose="fact_extraction",
+            )
+        assert result.raw_metadata["resolved_binary"] == "claude"  # autouse fixture pins to literal
+        assert result.raw_metadata["cmd"][0] == "claude"
+        assert "--print" in result.raw_metadata["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_codex_raw_metadata_carries_cmd_and_resolved_binary(self, tmp_path):
+        """Same shape as the claude case. Tested against the
+        non-schema branch so we exercise the simpler success path."""
+        reasoner = CodexOneShotReasoner(cwd=tmp_path, os_user=_current_user())
+        proc = _make_proc(stdout=_codex_event("agent_message", "free-form text").encode("utf-8") + b"\n")
+        with patch("kai.oneshot.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await reasoner.run(
+                prompt="hello",
+                timeout=30,
+                purpose="fact_extraction",
+                json_schema=None,
+            )
+        assert result.raw_metadata["resolved_binary"] == "codex"
+        assert result.raw_metadata["cmd"][0] == "codex"
+        assert "exec" in result.raw_metadata["cmd"]
 
 
 # ── _sanitize_for_codex (issue #505) ────────────────────────────────

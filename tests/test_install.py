@@ -1709,6 +1709,7 @@ class TestCmdConfig:
         memory_block = [
             "true",  # memory enabled
             "true",  # extraction enabled (claude backend)
+            "claude",  # MEMORY_REASONER_BACKEND (matches install vendor; suppressed at emission as default)
             "60",  # extraction timeout seconds (#345)
             "5",  # consolidation candidates (non-default, exercises emission branch)
             "5",  # episode classifier context turns (#392, non-default exercises emission)
@@ -1731,6 +1732,10 @@ class TestCmdConfig:
         env = conf["env"]
         assert env["MEMORY_ENABLED"] == "true"
         assert env["MEMORY_EXTRACTION_ENABLED"] == "true"
+        # MEMORY_REASONER_BACKEND="claude" is the dataclass default;
+        # the wizard's emission gate suppresses default values, so the
+        # key must NOT appear in the generated env.
+        assert "MEMORY_REASONER_BACKEND" not in env
         # Budget keys absent on claude backend: prompt is skipped, value
         # stays at dataclass default, double-gated emission suppresses.
         assert "MEMORY_EXTRACTION_BUDGET_USD" not in env
@@ -1778,6 +1783,7 @@ class TestCmdConfig:
         memory_block = [
             "true",  # memory enabled
             "true",  # extraction enabled
+            "claude",  # MEMORY_REASONER_BACKEND (default-accept; suppressed at emission)
             "10",  # extraction timeout (dataclass default; suppressed)
             "8",  # consolidation candidates (dataclass default; suppressed)
             "3",  # episode classifier context turns (#392, dataclass default; suppressed)
@@ -1823,6 +1829,7 @@ class TestCmdConfig:
         memory_block = [
             "true",
             "true",
+            "claude",  # MEMORY_REASONER_BACKEND (default-accept; suppressed)
             "45",
             "4",
             "7",  # episode classifier context turns (#392, non-default)
@@ -2076,6 +2083,7 @@ class TestCmdConfig:
         memory_block = [
             "true",  # memory enabled
             "true",  # extraction enabled
+            "claude",  # MEMORY_REASONER_BACKEND (default-accept; suppressed)
             "10",  # extraction timeout (default; suppressed)
             "8",  # consolidation candidates (default; suppressed)
             "5",  # episode classifier context turns (#392, non-default)
@@ -2106,6 +2114,7 @@ class TestCmdConfig:
         memory_block = [
             "true",  # memory enabled
             "true",  # extraction enabled
+            "claude",  # MEMORY_REASONER_BACKEND (default-accept; suppressed)
             "10",  # extraction timeout (default)
             "8",  # consolidation candidates (default)
             "3",  # episode classifier context turns (#392, dataclass default)
@@ -2151,6 +2160,237 @@ class TestCmdConfig:
         # that leaves a stale value in /etc/kai/env after a
         # claude→goose flip surfaces here.
         assert "EPISODE_CLASSIFIER_CONTEXT_TURNS" not in env
+
+    def test_goose_retrieval_only_does_not_persist_invalid_reasoner_backend(self, tmp_path, monkeypatch):
+        """v5 regression: a goose install accepting memory_enabled=true
+        with extraction disabled must NOT write MEMORY_REASONER_BACKEND
+        to the generated env. The wizard gates the prompt on
+        memory_extraction_enabled (the composed value), so on a
+        goose-backed install the prompt never fires and the key never
+        lands. Prevents the prior failure mode where the prompt fired
+        and `agent_backend=goose` as the default would have produced
+        MEMORY_REASONER_BACKEND=goose, failing load_config validation."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+
+        # Goose install: extraction is gated out, so no reasoner prompt.
+        # Inputs match the existing goose-skip test shape (memory_enabled,
+        # token_budget, search_limit).
+        memory_block = ["true", "2000", "10"]
+        inputs = iter(self._base_inputs(memory_block, agent_backend="goose"))
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        # The critical assertion: no invalid reasoner-backend value
+        # in the env. The cleanup block also drops it on non-supported
+        # backends as defense-in-depth.
+        assert "MEMORY_REASONER_BACKEND" not in env
+        # Extraction config is also absent on goose retrieval-only.
+        assert "MEMORY_EXTRACTION_ENABLED" not in env
+
+    def test_codex_install_accept_all_defaults_yields_load_config_compatible_env(self, tmp_path, monkeypatch):
+        """v6 catch-all regression: a codex install that accepts every
+        wizard default for memory must produce an env block that
+        load_config accepts without raising. Pins the entire 'wizard
+        default invalid under selected reasoner' bug class so a
+        future default flip lands as a single-test failure rather
+        than a runtime config-load SystemExit.
+
+        Test shape: rather than re-driving the full wizard (covered
+        by surrounding tests), this test pins the integration
+        contract directly: assemble the env block the wizard emits
+        on codex accept-all-defaults and feed it into load_config.
+        The wizard's emission rules are simple enough that the env
+        contents are mechanical: MEMORY_ENABLED=true,
+        MEMORY_EXTRACTION_ENABLED=true, MEMORY_REASONER_BACKEND=codex,
+        and no other memory keys (every other knob accepted the
+        dataclass default and the wizard's delta-from-default
+        emission suppresses them)."""
+        from kai.config import load_config
+
+        # Pin the resolver so this test does not depend on having
+        # codex actually installed on the host.
+        monkeypatch.setattr(
+            "kai.oneshot_binary.resolve_oneshot_binary",
+            lambda backend: f"/fake/{backend}",
+        )
+        # users.yaml is required for codex memory (config-load
+        # validates the per-user os_user precondition). The wizard
+        # builds this alongside the env block; here we set up a
+        # minimal users.yaml inline so the test focuses on the
+        # memory env contract.
+        users_yaml = tmp_path / "users.yaml"
+        users_yaml.write_text("users:\n  - telegram_id: 1\n    name: tester\n    role: admin\n    os_user: tester_os\n")
+        monkeypatch.setattr("kai.config.PROJECT_ROOT", tmp_path)
+        # Pin protected-env / dotenv to be inert. Without this,
+        # load_config reads /etc/kai/env (when present on the dev
+        # box) and `os.environ.setdefault` populates the process env
+        # with values that leak into subsequent tests. The /etc/kai/env
+        # on a dev install typically carries `CODEX_BIN=/Users/...`,
+        # which would make later test_review codex tests assert the
+        # absolute path instead of the literal "codex". The autouse
+        # fixture in test_config.py applies the same neutering for
+        # its scope; this test is in test_install.py and has to do
+        # it explicitly.
+        monkeypatch.setattr("kai.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setattr("kai.config._read_protected_file", lambda path: None)
+        # Seed only the env keys the wizard would emit. Everything
+        # else falls back to dataclass defaults via load_config.
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        monkeypatch.setenv("ALLOWED_USER_IDS", "1")
+        monkeypatch.setenv("AGENT_BACKEND", "codex")
+        # DEFAULT_MODEL validates against the agent backend's model
+        # set; codex requires a CODEX_MODELS entry. The wizard would
+        # have prompted for this; here we set it explicitly to focus
+        # the test on the memory wiring contract.
+        monkeypatch.setenv("DEFAULT_MODEL", "gpt-5.4")
+        monkeypatch.setenv("MEMORY_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_EXTRACTION_ENABLED", "true")
+        monkeypatch.setenv("MEMORY_REASONER_BACKEND", "codex")
+        # MEMORY_EPISODE_MODEL is intentionally NOT set; the codex
+        # branch defaults the wizard prompt to blank, which means
+        # load_config inherits from MEMORY_EXTRACTION_MODEL, which
+        # itself defaults to the codex registry SKU. The contract
+        # under test is "blank episode_model under codex resolves to
+        # a CODEX_MODELS-valid SKU."
+        config = load_config()
+        assert config.memory_enabled is True
+        assert config.memory_extraction_enabled is True
+        assert config.memory_reasoner_backend == "codex"
+        # Both models must validate as codex SKUs (load_config
+        # checks against CODEX_MODELS and SystemExits on miss).
+        from kai.config import CODEX_MODELS
+
+        assert config.memory_extraction_model in CODEX_MODELS
+        assert config.memory_episode_model in CODEX_MODELS
+
+    def test_codex_fresh_install_with_memory_extraction_yields_valid_users_yaml(self, tmp_path, monkeypatch):
+        """Fresh-install regression for the codex memory wizard gate.
+
+        When the wizard drives the path 'no users.yaml -> codex backend
+        -> enable memory -> enable extraction -> codex reasoner' AND the
+        operator accepts the default 'Configure advanced user options =
+        false' earlier in the prompt sequence, the wizard re-prompts for
+        a non-service os_user at the memory-reasoner-backend gate and
+        rewrites users.yaml in place before the env is persisted. The
+        produced env + generated users.yaml together must pass
+        load_config(); without the gate the wizard emits a users.yaml
+        with no os_user and load_config() SystemExits at next daemon
+        start ('chat_ids are missing os_user' on the codex precondition).
+
+        This test pins the full fresh-install integration contract, in
+        contrast to test_codex_install_accept_all_defaults_yields_load_
+        config_compatible_env which hand-seeds users.yaml and only
+        checks the env emission.
+        """
+        from unittest.mock import MagicMock
+
+        from kai.config import load_config
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._block_etc_kai(monkeypatch)
+        # Pin the model + codex-binary helpers so the test does not
+        # depend on the host having codex installed or a curated
+        # model registry on disk. The mock value below is a real
+        # CODEX_MODELS entry so load_config's model-vs-backend
+        # validation passes.
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            MagicMock(return_value="gpt-5.4"),
+        )
+        monkeypatch.setattr("kai.install._validate_codex_bin", lambda p: bool(p))
+
+        inputs = iter(
+            [
+                "/opt/kai",  # install dir
+                "/var/lib/kai",  # data dir
+                "kai",  # service user
+                "darwin",  # platform
+                "fake-token",  # bot token
+                "12345",  # admin telegram ID
+                "admin",  # admin display name
+                "false",  # advanced user options - the failure-mode entry
+                "polling",  # transport
+                "codex",  # agent backend
+                "subscription",  # codex auth mode
+                "/usr/local/bin/codex",  # codex binary path
+                # model: handled by _prompt_default_model mock
+                "120",  # agent timeout
+                "10.0",  # budget (codex != claude branch)
+                "200000",  # max context window
+                # autocompact + effort skipped on non-claude backend
+                "8080",  # webhook port
+                "test-secret",  # webhook secret
+                "",  # workspace base
+                "",  # allowed workspaces
+                "false",  # pr review enabled
+                "900",  # pr review timeout
+                "1.0",  # pr review budget (non-claude branch)
+                "false",  # issue triage enabled
+                "",  # github notify chat id
+                "false",  # voice
+                "false",  # tts
+                # claude_user skipped on agent_backend != claude
+                "true",  # memory enabled
+                "true",  # memory extraction enabled
+                "codex",  # memory reasoner backend
+                "codex_runner",  # NEW: re-prompted os_user after codex gate
+                "10",  # extraction timeout
+                "8",  # consolidation candidates
+                "3",  # episode classifier context turns
+                "",  # episode model (blank inherits extraction model)
+                "120",  # episode timeout
+                "0.9",  # paraphrase-dedup threshold
+                "2000",  # token budget
+                "10",  # search limit
+                "",  # perplexity key
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        _cmd_config()
+
+        # users.yaml must carry the re-prompted os_user. The wizard
+        # rewrote it in place after the codex memory gate fired; the
+        # pre-fix path left os_user absent here.
+        users_yaml_path = tmp_path / "users.yaml"
+        assert users_yaml_path.exists()
+        data = yaml.safe_load(users_yaml_path.read_text())
+        entry = data["users"][0]
+        assert entry["telegram_id"] == 12345
+        assert entry["os_user"] == "codex_runner"
+
+        # Integration pin: feed the produced env + users.yaml into
+        # load_config and assert it accepts the shape. Neuter the
+        # /etc/kai/ readers and PROJECT_ROOT so load_config consumes
+        # the wizard-generated artifacts under tmp_path. The
+        # oneshot-binary resolver is mocked because the test host
+        # has no codex binary; load_config validates the resolved
+        # path on the codex extraction-eligible branch.
+        env_block = json.loads((tmp_path / "install.conf").read_text())["env"]
+        monkeypatch.setattr("kai.config.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("kai.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setattr("kai.config._read_protected_file", lambda path: None)
+        monkeypatch.setattr(
+            "kai.oneshot_binary.resolve_oneshot_binary",
+            lambda backend: f"/fake/{backend}",
+        )
+        for key, value in env_block.items():
+            monkeypatch.setenv(key, value)
+
+        config = load_config()
+        assert config.memory_enabled is True
+        assert config.memory_extraction_enabled is True
+        assert config.memory_reasoner_backend == "codex"
+        assert config.user_configs is not None
+        assert 12345 in config.user_configs
+        assert config.user_configs[12345].os_user == "codex_runner"
 
 
 # ── Apply subcommand ─────────────────────────────────────────────────
@@ -2495,49 +2735,131 @@ class TestCmdConfigDefaultModelDispatch:
         assert helper.call_args.args[2] != "opus"
         assert env["DEFAULT_MODEL"] == "gpt-5.4-mini"
 
-    def test_codex_install_zeroes_both_memory_flags(self, tmp_path, monkeypatch):
+    def test_codex_install_enables_memory_with_codex_reasoner(self, tmp_path, monkeypatch):
         """
-        Codex installs must force MEMORY_ENABLED=false AND
-        MEMORY_EXTRACTION_ENABLED=false. The Haiku extraction pipeline
-        bypasses the agent backend abstraction and shells out to
-        claude directly; running it on a codex-backed install would
-        either inject a [Memory subsystem: enabled] marker into the
-        inner codex agent's session context against a subsystem that
-        cannot service its requests, or attempt to spawn a claude
-        binary that may not be installed.
+        Codex installs CAN enable semantic memory. The reasoner
+        backend defaults to codex (matching the agent backend), the
+        extraction-enabled flag persists, MEMORY_REASONER_BACKEND
+        lands as a non-default value, and the stale-key cleanup at
+        wizard end no longer strips the codex extraction config.
 
-        The operator says yes to "Enable semantic memory" at the
-        prompt; the guard catches it. Neither flag should appear in
-        the resulting install.conf env (codex emits memory keys only
-        when they are non-default, and both default to false).
+        Regression for the prior wizard behavior that forced both
+        memory flags off on codex installs and printed a "currently
+        requires the claude backend" message; that guard came out
+        when the OneShotReasoner abstraction made codex memory
+        reachable end-to-end.
         """
-        # Seed install.conf with existing_env that has BOTH memory flags
-        # set to true. The guard's pre-check reads MEMORY_EXTRACTION_ENABLED
-        # before it can be zeroed by the unconditional reset later in the
-        # function, so the guard message fires.
         self._setup(
             monkeypatch,
             tmp_path,
-            existing_env={
-                "DEFAULT_MODEL": "gpt-5.4",
-                "MEMORY_ENABLED": "true",
-                "MEMORY_EXTRACTION_ENABLED": "true",
-            },
+            existing_env={"DEFAULT_MODEL": "gpt-5.4"},
         )
-        _, env = self._run(
-            monkeypatch,
-            tmp_path,
-            # Operator answers "true" at the memory_enabled prompt; the
-            # guard overrides it. Without the guard, MEMORY_ENABLED=true
-            # would land in the resulting install.conf.
-            self._inputs_for_codex_subscription(memory_enabled="true"),
-            helper_return="gpt-5.4",
+        # Feed the wizard codex defaults for every memory prompt. The
+        # reasoner_backend default mirrors agent_backend=codex, so
+        # accepting it via empty string locks in MEMORY_REASONER_BACKEND
+        # =codex. The episode model default is empty (inherit
+        # extraction model) on the codex reasoner branch; accepting
+        # blank exercises that path.
+        memory_inputs = [
+            "true",  # MEMORY_ENABLED
+            "true",  # MEMORY_EXTRACTION_ENABLED
+            "",  # MEMORY_REASONER_BACKEND (accept default = codex)
+            "10",  # extraction timeout (dataclass default)
+            "8",  # consolidation candidates (dataclass default)
+            "3",  # episode classifier context turns (dataclass default)
+            "",  # episode model (blank inherits extraction model on codex)
+            "120",  # episode timeout (dataclass default)
+            "0.9",  # paraphrase-dedup threshold (dataclass default)
+            "2000",  # token budget (dataclass default)
+            "10",  # search limit (dataclass default)
+        ]
+        # Codex-subscription inputs sequence inserts memory_enabled
+        # as the second-to-last entry (before the perplexity key).
+        # Replace memory_enabled with "true" and append the rest of
+        # the memory block in order; the helper currently emits
+        # memory_enabled as the final memory-flag entry, so we splice
+        # the new prompt sequence into the rest of the chain.
+        base_inputs = self._inputs_for_codex_subscription(memory_enabled="true")
+        # Find the memory_enabled slot ("true") and insert the rest
+        # of the memory block immediately after it; the trailing
+        # perplexity key entry stays at the end.
+        idx = len(base_inputs) - 2  # memory_enabled position
+        inputs = base_inputs[: idx + 1] + memory_inputs[1:] + base_inputs[idx + 1 :]
+        _, env = self._run(monkeypatch, tmp_path, inputs, helper_return="gpt-5.4")
+        # Codex install now persists memory extraction config. The
+        # reasoner backend is codex (non-default; emitted), and the
+        # extraction flag survives the cleanup block that previously
+        # stripped it on non-claude installs.
+        assert env.get("MEMORY_ENABLED") == "true"
+        assert env.get("MEMORY_EXTRACTION_ENABLED") == "true"
+        assert env.get("MEMORY_REASONER_BACKEND") == "codex"
+
+    def test_claude_install_codex_reasoner_emits_codex_bin_and_matches_sudoers(self, tmp_path, monkeypatch):
+        """claude+codex memory regression: when AGENT_BACKEND=claude but
+        MEMORY_REASONER_BACKEND=codex, the wizard must still collect
+        CODEX_BIN (the earlier agent-block prompt is skipped because the
+        agent backend is not codex). install.conf must emit CODEX_BIN,
+        and the sudoers rules _generate_sudoers produces from that env
+        must reference the same path. Without this contract the codex
+        memory reasoner spawns the binary resolved from PATH while the
+        sudoers SETENV rule allows only the wizard's fallback
+        /opt/homebrew/bin/codex; if the two diverge, every cross-user
+        codex call fails with "a password is required" and extraction
+        silently no-ops.
+        """
+        from kai.install import _generate_sudoers
+
+        self._setup(monkeypatch, tmp_path, existing_env={"DEFAULT_MODEL": "sonnet"})
+        # The new claude-with-codex-reasoner memory block. The
+        # CODEX_BIN re-prompt is the load-bearing entry: it only
+        # fires when memory_reasoner_backend == codex AND the earlier
+        # codex agent-block did not collect a path (agent_backend !=
+        # codex). Episode model is left blank to inherit the codex
+        # extraction default in load_config.
+        memory_inputs = [
+            "true",  # MEMORY_ENABLED
+            "true",  # MEMORY_EXTRACTION_ENABLED
+            "codex",  # MEMORY_REASONER_BACKEND (override default = claude)
+            "/usr/local/bin/codex",  # NEW: codex_bin re-prompt at memory gate
+            "10",  # extraction timeout (dataclass default)
+            "8",  # consolidation candidates (dataclass default)
+            "3",  # episode classifier context turns (dataclass default)
+            "",  # episode model (blank inherits extraction model on codex)
+            "120",  # episode timeout (dataclass default)
+            "0.9",  # paraphrase-dedup threshold (dataclass default)
+            "2000",  # token budget (dataclass default)
+            "10",  # search limit (dataclass default)
+        ]
+        # _inputs_for_claude_backend places memory_enabled as the
+        # second-to-last entry. Replace it with "true" and splice the
+        # rest of the memory block immediately after; the trailing
+        # perplexity-key entry stays at the end.
+        base_inputs = self._inputs_for_claude_backend()
+        idx = len(base_inputs) - 2  # memory_enabled position
+        base_inputs = base_inputs[:idx] + ["true"] + base_inputs[idx + 1 :]
+        inputs = base_inputs[: idx + 1] + memory_inputs[1:] + base_inputs[idx + 1 :]
+        _, env = self._run(monkeypatch, tmp_path, inputs, helper_return="sonnet")
+        assert env.get("MEMORY_REASONER_BACKEND") == "codex"
+        # The wizard must emit CODEX_BIN even though AGENT_BACKEND=
+        # claude. Pre-fix this assertion failed because the env-
+        # emission block was gated on agent_backend == codex.
+        assert env.get("CODEX_BIN") == "/usr/local/bin/codex"
+
+        # Sudoers rules generated from env["CODEX_BIN"] must use the
+        # same path. This pins the install-time wiring so the codex
+        # memory reasoner argv (which resolves codex via the same
+        # binary path through resolve_oneshot_binary) and the
+        # sudoers SETENV rule cannot drift apart. _user_home is
+        # patched because the sudoers generator inspects per-target
+        # home directories that do not exist on the test host.
+        monkeypatch.setattr("kai.install._user_home", lambda u: f"/home/{u}")
+        sudoers = _generate_sudoers(
+            "kai",
+            os_users=["alice"],
+            codex_bin=env["CODEX_BIN"],
         )
-        # Both memory keys must be absent from the emitted env (the
-        # emission code only writes them when true; the guard forced
-        # both flags false).
-        assert "MEMORY_ENABLED" not in env
-        assert "MEMORY_EXTRACTION_ENABLED" not in env
+        codex_lines = [line for line in sudoers.splitlines() if "(alice)" in line and "/usr/local/bin/codex" in line]
+        assert len(codex_lines) == 1, codex_lines
 
 
 class TestCmdApplyDefaultModelGate:
@@ -5892,14 +6214,129 @@ class TestApplyAgentTimeoutMigration:
 class TestPerOsUserCodexLoginHint:
     """Post-install hint enumerates per-os_user codex login.
 
-    The hint block fires in the success path of _cmd_apply (non-dry-run)
-    after every real install side effect, so isolating it in pytest
-    requires mocking the full install pipeline. Verified at smoke-test
-    time instead; the helper it consumes (_collect_os_users_from_yaml)
-    is independently covered.
+    The reminder fires when codex actually runs on this install: agent
+    backend = codex OR memory reasoner = codex. Subscription auth lives
+    under each spawning user's home, so the reminder must enumerate
+    every distinct os_user in users.yaml (falling back to the service
+    user only when none are configured). The gate and enumeration are
+    factored into `_build_codex_login_reminder` so this test exercises
+    them directly without driving the full _cmd_apply pipeline.
     """
 
-    def test_collect_os_users_helper_unaffected(self):
-        from kai.install import _collect_os_users_from_yaml
+    @staticmethod
+    def _write_users_yaml(tmp_path, entries: list[dict]) -> Path:
+        path = tmp_path / "users.yaml"
+        path.write_text(yaml.safe_dump({"users": entries}))
+        return path
 
-        assert callable(_collect_os_users_from_yaml)
+    def test_claude_agent_with_codex_memory_reasoner_emits_reminder(self, tmp_path):
+        """The reviewer-flagged regression. With AGENT_BACKEND=claude and
+        MEMORY_REASONER_BACKEND=codex, codex still runs per-user for
+        memory extraction; the operator must run `codex login` as the
+        target os_user or the first extraction fails with no auth.
+        Pre-fix the reminder was suppressed because the gate keyed on
+        AGENT_BACKEND alone.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [{"telegram_id": 12345, "name": "alice", "role": "admin", "os_user": "alice"}],
+        )
+        env = {
+            "AGENT_BACKEND": "claude",
+            "MEMORY_REASONER_BACKEND": "codex",
+        }
+        text = _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml)
+        assert text is not None
+        assert "Codex subscription auth required:" in text
+        assert "alice ~$ codex login" in text
+        # service-user fallback must NOT fire when users.yaml has entries.
+        assert "kai ~$ codex login" not in text
+
+    def test_codex_agent_backend_still_emits_reminder(self, tmp_path):
+        """Defense-in-depth for the original gate: AGENT_BACKEND=codex
+        alone (no memory) still produces the reminder.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [{"telegram_id": 1, "name": "alice", "role": "admin", "os_user": "alice"}],
+        )
+        env = {"AGENT_BACKEND": "codex"}
+        text = _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml)
+        assert text is not None
+        assert "alice ~$ codex login" in text
+
+    def test_pure_claude_no_codex_anywhere_returns_none(self, tmp_path):
+        """No codex surface, no reminder. Claude memory extraction does
+        not spawn codex; emitting the hint here would be wizard noise.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [{"telegram_id": 1, "name": "alice", "role": "admin", "os_user": "alice"}],
+        )
+        env = {"AGENT_BACKEND": "claude"}
+        assert _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml) is None
+
+    def test_codex_api_key_mode_returns_none(self, tmp_path):
+        """API-key auth needs no per-user login; the env var ships the
+        token. The reminder must skip both codex-anywhere cases when
+        CODEX_AUTH_MODE=api_key.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [{"telegram_id": 1, "name": "alice", "role": "admin", "os_user": "alice"}],
+        )
+        for env in (
+            {"AGENT_BACKEND": "codex", "CODEX_AUTH_MODE": "api_key"},
+            {
+                "AGENT_BACKEND": "claude",
+                "MEMORY_REASONER_BACKEND": "codex",
+                "CODEX_AUTH_MODE": "api_key",
+            },
+        ):
+            assert _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml) is None, env
+
+    def test_no_os_users_falls_back_to_service_user(self, tmp_path):
+        """When users.yaml has no os_user entries (legacy single-user
+        mode or empty file), the fallback hint names the service user.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [{"telegram_id": 1, "name": "alice", "role": "admin"}],
+        )
+        env = {"AGENT_BACKEND": "codex"}
+        text = _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml)
+        assert text is not None
+        assert "kai ~$ codex login" in text
+
+    def test_multiple_os_users_enumerated_and_deduplicated(self, tmp_path):
+        """Each distinct os_user gets one line. Duplicates in users.yaml
+        collapse so the operator does not see redundant hints; order is
+        deterministic (sorted) so the post-install output is stable
+        across runs.
+        """
+        from kai.install import _build_codex_login_reminder
+
+        users_yaml = self._write_users_yaml(
+            tmp_path,
+            [
+                {"telegram_id": 1, "name": "alice", "role": "admin", "os_user": "alice"},
+                {"telegram_id": 2, "name": "bob", "role": "user", "os_user": "bob"},
+                {"telegram_id": 3, "name": "carol", "role": "user", "os_user": "alice"},
+            ],
+        )
+        env = {"AGENT_BACKEND": "codex"}
+        text = _build_codex_login_reminder(env, "kai", users_yaml_path=users_yaml)
+        assert text is not None
+        # alice once (dedup), bob once; sorted ordering puts alice first.
+        login_lines = [line for line in text.splitlines() if "~$ codex login" in line]
+        assert login_lines == ["    alice ~$ codex login", "    bob ~$ codex login"]

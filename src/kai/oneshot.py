@@ -40,6 +40,7 @@ from typing import Any, Protocol
 
 from kai.codex_exec import extract_codex_text
 from kai.config import DATA_DIR, resolve_claude_user
+from kai.oneshot_binary import BinaryResolutionError, resolve_oneshot_binary
 from kai.prompt_utils import make_boundary
 
 log = logging.getLogger(__name__)
@@ -477,7 +478,20 @@ class ClaudeOneShotReasoner:
         self._cwd.mkdir(parents=True, exist_ok=True)
         self._cwd.chmod(0o755)
 
-        cmd: list[str] = ["claude", "--print"]
+        # Resolve the claude binary through the shared resolver so
+        # config validation, this argv, and the smoke output all see
+        # the same resolution result. BinaryResolutionError from the
+        # resolver becomes OneShotRoutingError here so the existing
+        # memory_extraction `except OneShotError` catch surface still
+        # collapses the failure to the zero-state extraction result;
+        # the rewrap preserves the leaf-resolver / reasoner-error
+        # split documented on oneshot_binary.
+        try:
+            resolved_binary = resolve_oneshot_binary("claude")
+        except BinaryResolutionError as e:
+            raise OneShotRoutingError(str(e)) from e
+
+        cmd: list[str] = [resolved_binary, "--print"]
         if model is not None:
             cmd.extend(["--model", model])
         cmd.extend(["--output-format", "json"])
@@ -600,6 +614,14 @@ class ClaudeOneShotReasoner:
                 "returncode": returncode,
                 "stderr": stderr,
                 "cwd": str(self._cwd),
+                # cmd is the post-wrap argv (includes sudo prefix on
+                # cross-user routing); resolved_binary is the pre-wrap
+                # agent path. Smoke prints resolved_binary directly so
+                # the operator-visible "which binary ran" answer does
+                # not regress under the sudo wrap, where cmd[0] is
+                # "sudo" rather than the agent.
+                "cmd": list(cmd),
+                "resolved_binary": resolved_binary,
             },
             duration_ms=duration_ms,
         )
@@ -913,10 +935,17 @@ class CodexOneShotReasoner:
                 policy says any agent subprocess that inherits the
                 bot's sudoers permissions can be coerced into reading
                 kai-only protected files. `run()` raises
-                `OneShotRoutingError` when `os_user is None`. A
-                supplied `os_user` matching the current process is
-                the legitimate self-sudo-skip case (single-user
-                install), detected by `resolve_claude_user`.
+                `OneShotRoutingError` when `os_user is None`, AND
+                when a supplied `os_user` resolves to the current
+                process user via `resolve_claude_user` (the same-
+                user case). Unlike claude, the self-sudo-skip is
+                NOT a legitimate path here: claude can safely run
+                in-process because Max-plan OAuth state lives under
+                the bot user's home, but codex would gain unintended
+                access to bot-user-only protected files (/etc/kai/
+                env, etc.). load_config() mirrors the refusal at
+                startup so a misconfigured users.yaml fails fast
+                rather than silently no-opping every extraction.
         """
         self._cwd = cwd if cwd is not None else _EXTRACTOR_CWD
         self._os_user = os_user
@@ -952,9 +981,21 @@ class CodexOneShotReasoner:
         self._cwd.mkdir(parents=True, exist_ok=True)
         self._cwd.chmod(0o755)
 
-        codex_bin = os.environ.get("CODEX_BIN") or "codex"
+        # Resolve the codex binary through the shared resolver so
+        # config validation, this argv, and the smoke output all see
+        # the same resolution result. Tighter than the previous inline
+        # `os.environ.get("CODEX_BIN") or "codex"` because the resolver
+        # validates an explicit CODEX_BIN override as is-file plus
+        # executable (no PATH fallback for a bad override), matching
+        # config-load validation. BinaryResolutionError becomes
+        # OneShotRoutingError here so the existing memory_extraction
+        # `except OneShotError` catch surface is unchanged.
+        try:
+            resolved_binary = resolve_oneshot_binary("codex")
+        except BinaryResolutionError as e:
+            raise OneShotRoutingError(str(e)) from e
         cmd: list[str] = [
-            codex_bin,
+            resolved_binary,
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -965,6 +1006,32 @@ class CodexOneShotReasoner:
         ]
         if model is not None:
             cmd.extend(["--model", model])
+
+        # Per-user OS routing. The construction-level None case was
+        # refused at the top of run(). resolve_claude_user returns
+        # None when the target user matches the current process user
+        # (the historical self-sudo-skip path). For claude, the
+        # self-sudo-skip is legitimate (Max-plan OAuth state lives
+        # under the bot user's home). For codex, it is a security
+        # boundary violation: codex MUST NOT run as the bot user, or
+        # it gains access to /etc/kai/env and other bot-user-only
+        # state. Refuse the same-user case here with the same typed
+        # error as the construction-level None case so the caller's
+        # collapse-to-zero-state path applies uniformly. The refusal
+        # fires BEFORE the schema temp file is written so there is
+        # nothing to clean up on this branch.
+        effective_user = resolve_claude_user(self._os_user)
+        if effective_user is None:
+            log.info(
+                "oneshot_reasoner purpose=%s backend=codex model=%s duration_ms=0 outcome=routing_error error_category=same_user_refused os_user=self",
+                purpose,
+                model,
+            )
+            raise OneShotRoutingError(
+                "codex memory routing refuses same-user spawn; "
+                f"os_user={self._os_user!r} resolves to the bot user. "
+                "Set users.yaml os_user to a different OS account."
+            )
 
         # Schema temp file lifecycle. Written before subprocess spawn
         # so the CLI sees a populated file; removed in `finally` so
@@ -1008,15 +1075,10 @@ class CodexOneShotReasoner:
             schema_path.chmod(0o644)
             cmd.extend(["--output-schema", str(schema_path)])
 
-        # Per-user OS routing. The construction-level None case is
-        # already refused above; this branch covers the self-sudo-
-        # skip (target == bot user, where resolve_claude_user returns
-        # None) and the cross-user case (target != bot user, where it
-        # returns the target). Self-sudo-skip spawns directly with no
-        # wrap; cross-user wraps in sudo with the auth preserve list.
-        effective_user = resolve_claude_user(self._os_user)
-        if effective_user is not None:
-            cmd = _wrap_cmd_for_user(cmd, effective_user, "codex")
+        # Wrap codex in `sudo -H -u <target>` with the auth preserve
+        # list. Same-user routing is already refused above; this
+        # branch always wraps.
+        cmd = _wrap_cmd_for_user(cmd, effective_user, "codex")
 
         # Allow-listed env: only forward keys present in the parent
         # env. Defense-in-depth against a future regression that
@@ -1115,6 +1177,15 @@ class CodexOneShotReasoner:
                         "returncode": returncode,
                         "stderr": stderr,
                         "cwd": str(self._cwd),
+                        # cmd is post-wrap (includes sudo prefix on
+                        # cross-user routing); resolved_binary is the
+                        # pre-wrap agent path. Smoke prints
+                        # resolved_binary so the operator-visible
+                        # "which binary ran" answer survives the sudo
+                        # wrap, where cmd[0] is "sudo" rather than
+                        # the agent.
+                        "cmd": list(cmd),
+                        "resolved_binary": resolved_binary,
                     },
                     duration_ms=duration_ms,
                 )
@@ -1216,6 +1287,13 @@ class CodexOneShotReasoner:
                     "returncode": returncode,
                     "stderr": stderr,
                     "cwd": str(self._cwd),
+                    # cmd / resolved_binary as documented on the
+                    # free-form return above; same fields populate
+                    # on every codex success branch so the smoke
+                    # output reads the same shape regardless of
+                    # whether json_schema was set.
+                    "cmd": list(cmd),
+                    "resolved_binary": resolved_binary,
                 },
                 duration_ms=duration_ms,
             )

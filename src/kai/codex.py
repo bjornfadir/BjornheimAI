@@ -54,11 +54,11 @@ from kai.backend import (
     ApiContext,
     StreamEvent,
     apply_workspace_model,
+    assemble_turn_context,
     build_foreign_workspace_reminder,
     build_session_context,
     ensure_user_memory,
     ensure_user_preferences,
-    prepend_to_prompt,
 )
 from kai.config import DATA_DIR, WorkspaceConfig, parse_env_file, resolve_claude_user
 
@@ -561,18 +561,18 @@ class CodexBackend(AgentBackend):
             )
             return
 
-        # Inject identity, memory, history, and API context on the
-        # first message of a new session. Context injection logic
-        # lives in backend.py as shared functions.
+        # Per-turn prompt context. Build the fresh-session bootstrap
+        # (MEMORY.md / PREFERENCES.md seed + session_context block)
+        # and the foreign-workspace reminder LOCALLY, then hand both
+        # to `assemble_turn_context` so the shared helper owns the
+        # ordering invariant (USER_MESSAGE_MARKER closest to user
+        # text; session_context, semantic memory, workspace reminder
+        # stacked above in that order). Mirrors the ClaudeCodeBackend
+        # wire-through; backend-owned lifecycle stays here, shared
+        # string composition stays in the helper.
+        session_ctx = ""
         if self._fresh_session:
             self._fresh_session = False
-            # Mirror the ClaudeCodeBackend / GooseBackend send() path:
-            # ensure the per-user MEMORY.md and PREFERENCES.md surfaces
-            # exist before building the session context. The codex
-            # backend ships with memory_enabled=False by default, so
-            # the MEMORY.md path is created but the subsystem marker
-            # in the injected context is "disabled" until backend-
-            # agnostic semantic memory lands.
             ensure_user_memory(chat_id, DATA_DIR)
             ensure_user_preferences(chat_id, DATA_DIR)
             session_ctx = build_session_context(
@@ -584,32 +584,60 @@ class CodexBackend(AgentBackend):
                 data_dir=DATA_DIR,
                 memory_enabled=self.memory_enabled,
             )
-            prompt = prepend_to_prompt(prompt, session_ctx)
 
-        # When in a foreign workspace, remind on every message to only
-        # respond to what the user asks.
-        reminder = build_foreign_workspace_reminder(self.workspace, self.home_workspace)
-        if reminder:
-            prompt = prepend_to_prompt(prompt, reminder)
+        # Foreign-workspace reminder is built fresh per turn (its
+        # value depends on the current workspace, which the operator
+        # can change between messages via `/workspace`).
+        # `assemble_turn_context` no-ops on an empty string, so
+        # coerce the None to "" rather than threading the optional
+        # through the helper signature.
+        reminder = build_foreign_workspace_reminder(self.workspace, self.home_workspace) or ""
 
-        # Coerce prompt to the JSON-RPC content-block format.
-        # The codex CLI accepts text content blocks; image / audio
-        # support is deferred until the smoke test confirms which
-        # block types the pinned version handles.
-        rpc_prompt: list[dict] = []
-        if isinstance(prompt, str):
-            rpc_prompt = [{"type": "text", "text": prompt}]
-        else:
+        # Strip non-text user blocks before per-turn assembly. The
+        # codex CLI accepts text blocks only; the drop must run BEFORE
+        # assemble_turn_context so the marker it prepends labels a
+        # real user-text region. Stripping after the helper would
+        # leave injected text layers (session_context, reminder,
+        # memory) above the marker and nothing below it.
+        had_user_text = isinstance(prompt, str)
+        if isinstance(prompt, list):
+            text_blocks: list[dict] = []
             for block in prompt:
                 if block.get("type") == "text":
-                    rpc_prompt.append({"type": "text", "text": block["text"]})
+                    text_blocks.append({"type": "text", "text": block["text"]})
                 else:
                     log.warning(
                         "CodexBackend: dropping non-text content block type=%s",
                         block.get("type"),
                     )
-            if not rpc_prompt:
-                rpc_prompt = [{"type": "text", "text": "(empty prompt)"}]
+            had_user_text = bool(text_blocks)
+            # Codex requires a non-empty `input` array. An all-non-text
+            # input becomes a single placeholder so the marker has a
+            # user region to label.
+            prompt = text_blocks or [{"type": "text", "text": "(empty prompt)"}]
+
+        # `chat_id=None` to the helper suppresses semantic recall for
+        # this turn. The placeholder text "(empty prompt)" is backend-
+        # synthetic and must not become a memory search query; only
+        # real user text drives recall. Session context still uses
+        # the real chat_id - it was built above this point.
+        recall_chat_id = chat_id if had_user_text else None
+        prompt = await assemble_turn_context(
+            prompt,
+            chat_id=recall_chat_id,
+            session_context=session_ctx,
+            workspace_reminder=reminder,
+        )
+
+        # Coerce to the JSON-RPC content-block shape. `prompt` is
+        # either a str (from a str input; the helper preserves the
+        # input type family) or a list of text blocks (every non-
+        # text block was stripped above).
+        rpc_prompt: list[dict]
+        if isinstance(prompt, str):
+            rpc_prompt = [{"type": "text", "text": prompt}]
+        else:
+            rpc_prompt = prompt
 
         # Send the turn/start request. The codex app-server protocol
         # uses `input` (array of typed content blocks) plus `threadId`;

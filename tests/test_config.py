@@ -2504,6 +2504,40 @@ class TestValidateModelForBackend:
 
         assert validate_model_for_backend("opus", "claude", "anthropic") is True
 
+    def test_opencode_accepts_provider_slash_model_shape(self):
+        """OpenCode requires the `provider/model` structural shape."""
+        from kai.config import validate_model_for_backend
+
+        assert validate_model_for_backend("anthropic/claude-sonnet-4-6", "opencode", "") is True
+        assert validate_model_for_backend("openai/gpt-5.5", "opencode", "") is True
+        assert validate_model_for_backend("opencode/big-pickle", "opencode", "") is True
+
+    def test_opencode_rejects_bare_anthropic_names(self):
+        """`opus` / `sonnet` are valid on claude/goose/codex but typos on opencode.
+
+        The operator footgun the structural check guards against: a
+        bare Anthropic name typed into /model on an opencode install
+        would otherwise persist as OPENCODE_CONFIG_CONTENT='{"model":
+        "opus"}' and fail at handshake without pointing back to the
+        Kai-side typo.
+        """
+        from kai.config import validate_model_for_backend
+
+        assert validate_model_for_backend("opus", "opencode", "anthropic") is False
+        assert validate_model_for_backend("sonnet", "opencode", "anthropic") is False
+        assert validate_model_for_backend("haiku", "opencode", "anthropic") is False
+
+    def test_opencode_rejects_malformed_shapes(self):
+        """Empty segments, missing separator, and extra separators all fail."""
+        from kai.config import validate_model_for_backend
+
+        assert validate_model_for_backend("", "opencode", "") is False
+        assert validate_model_for_backend("/foo", "opencode", "") is False
+        assert validate_model_for_backend("foo/", "opencode", "") is False
+        assert validate_model_for_backend("foo//bar", "opencode", "") is False
+        assert validate_model_for_backend("foo/bar/baz", "opencode", "") is False
+        assert validate_model_for_backend("/", "opencode", "") is False
+
 
 class TestModelsForBackend:
     """Wizard/runtime model-keyboard list helper."""
@@ -2527,6 +2561,29 @@ class TestModelsForBackend:
         from kai.config import models_for_backend
 
         assert models_for_backend("goose", "openrouter") is None
+
+    def test_opencode_returns_none(self):
+        """OpenCode has no curated keyboard; bot.py /model falls back to free text."""
+        from kai.config import models_for_backend
+
+        assert models_for_backend("opencode", "") is None
+        assert models_for_backend("opencode", "anthropic") is None
+
+
+class TestValidBackends:
+    """Pin the VALID_BACKENDS set membership."""
+
+    def test_all_four_backends_listed(self):
+        """claude, goose, codex, opencode."""
+        from kai.config import VALID_BACKENDS
+
+        assert sorted(VALID_BACKENDS) == ["claude", "codex", "goose", "opencode"]
+
+    def test_opencode_not_in_valid_providers(self):
+        """OpenCode auth lives in opencode-cli config; no provider/API-key wizard prompt fires."""
+        from kai.config import VALID_PROVIDERS
+
+        assert "opencode" not in VALID_PROVIDERS
 
 
 class TestGetUserBackendAndProvider:

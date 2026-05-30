@@ -1160,6 +1160,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces (empty)
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout (seconds)
                 "1.0",  # pr review budget (USD)
                 "false",  # issue triage enabled
@@ -1235,6 +1236,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces (empty)
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout (seconds)
                 "1.0",  # pr review budget (USD)
                 "false",  # issue triage enabled
@@ -1315,6 +1317,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout
                 "1.0",  # pr review budget
                 "false",  # issue triage enabled
@@ -1382,6 +1385,7 @@ class TestCmdConfig:
                 "~/Projects",
                 "",
                 "false",
+                "300",  # pr review cooldown (global resource control)
                 "900",
                 "1.0",
                 "false",
@@ -1439,6 +1443,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces (empty)
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout (seconds)
                 "1.0",  # pr review budget (USD)
                 "false",  # issue triage enabled
@@ -1493,6 +1498,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces (empty)
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout (seconds)
                 "1.0",  # pr review budget (USD)
                 "false",  # issue triage enabled
@@ -1677,6 +1683,7 @@ class TestCmdConfig:
             "~/Projects",  # workspace base
             "",  # allowed workspaces
             "false",  # pr review enabled
+            "300",  # pr review cooldown (global resource control, always prompts)
             "900",  # pr review timeout
             *pr_review_budget_entry,  # PR_REVIEW_BUDGET_USD (non-claude only)
             "false",  # issue triage
@@ -2125,6 +2132,7 @@ class TestCmdConfig:
                 "~/Projects",  # workspace base
                 "",  # allowed workspaces
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout
                 "1.0",  # pr review budget
                 "false",  # issue triage
@@ -2465,6 +2473,7 @@ class TestCmdConfig:
                 "",  # workspace base
                 "",  # allowed workspaces
                 "false",  # pr review enabled
+                "300",  # pr review cooldown (global resource control)
                 "900",  # pr review timeout
                 "1.0",  # pr review budget (non-claude branch)
                 "false",  # issue triage enabled
@@ -2751,10 +2760,17 @@ class TestCmdConfigDefaultModelDispatch:
     Wizard dispatch for DEFAULT_MODEL when users.yaml exists.
 
     Dispatch shape:
-    - if the existing model is non-empty and validates against the effective
-      provider, keep it (no prompt);
-    - otherwise call _prompt_default_model with the provider's curated
-      default as the prefill (never the just-rejected value).
+    - _prompt_default_model fires on every wizard run, regardless of
+      whether the existing value validates;
+    - the prefill is the existing value when it validates against the
+      effective backend, otherwise the backend-aware curated default
+      (never the just-rejected value).
+
+    Always routing through the prompt is load-bearing: it lets an
+    operator with users.yaml present change the inherited global
+    model via `make config` instead of needing to hand-edit
+    /etc/kai/env. The previous "keep silently on valid match"
+    shortcut closed that path.
 
     The wizard has many prompts that fire before and after the model
     dispatch. The helper below mocks _prompt_default_model to capture
@@ -2793,7 +2809,14 @@ class TestCmdConfigDefaultModelDispatch:
 
     @staticmethod
     def _inputs_for_claude_backend() -> list[str]:
-        """Input chain for the users_yaml_exists=True + claude path."""
+        """Input chain for the users_yaml_exists=True + claude path.
+
+        Post-tranche-B, the global-default prompts fire unconditionally
+        even when users.yaml exists, so the chain feeds timeout,
+        max_context_window, workspace_base, and pr_review_cooldown
+        values that the pre-tranche-B users-yaml-exists branch had
+        skipped silently.
+        """
         return [
             "/opt/kai",  # install dir
             "/var/lib/kai",  # data dir
@@ -2803,10 +2826,14 @@ class TestCmdConfigDefaultModelDispatch:
             "polling",  # transport
             "claude",  # agent backend
             # model prompt is handled by the _prompt_default_model mock
+            "120",  # agent timeout (global default)
+            "200000",  # max context window (global default)
             "80",  # autocompact pct
             "",  # effort level (default)
             "8080",  # webhook port
             "test-secret",  # webhook secret
+            "~/Projects",  # workspace base (global default)
+            "300",  # pr review cooldown (global resource control)
             "900",  # pr review subprocess timeout
             "false",  # voice
             "false",  # tts
@@ -2836,10 +2863,15 @@ class TestCmdConfigDefaultModelDispatch:
             # No OPENAI_API_KEY prompt in subscription mode
             "/usr/local/bin/codex",  # codex binary path
             # No llm_provider prompt (VALID_PROVIDERS["codex"] is None)
-            # No autocompact_pct / effort_level prompts (claude-only)
             # Model prompt handled by the _prompt_default_model mock
+            "120",  # agent timeout (global default)
+            "10.0",  # BUDGET_CEILING (non-claude only)
+            "200000",  # max context window (global default)
+            # No autocompact_pct / effort_level prompts (claude-only)
             "8080",  # webhook port
             "test-secret",  # webhook secret
+            "~/Projects",  # workspace base (global default)
+            "300",  # pr review cooldown (global resource control)
             "900",  # pr review subprocess timeout
             "1.0",  # pr review subprocess budget (non-claude only)
             "false",  # voice
@@ -2862,9 +2894,14 @@ class TestCmdConfigDefaultModelDispatch:
             "openai",  # llm provider
             "openai-key",  # OPENAI_API_KEY
             # model prompt is handled by the _prompt_default_model mock
-            "80",  # autocompact pct
+            "120",  # agent timeout (global default)
+            "10.0",  # BUDGET_CEILING (non-claude only)
+            "200000",  # max context window (global default)
+            # autocompact_pct / effort_level prompts are claude-only (gated)
             "8080",  # webhook port
             "test-secret",  # webhook secret
+            "~/Projects",  # workspace base (global default)
+            "300",  # pr review cooldown (global resource control)
             "900",  # pr review subprocess timeout
             "1.0",  # pr review subprocess budget (non-claude only)
             "false",  # voice
@@ -2916,21 +2953,28 @@ class TestCmdConfigDefaultModelDispatch:
         assert helper.call_args.args[1] == "openai"
         assert env["DEFAULT_MODEL"] == "gpt-5.4-mini"
 
-    def test_no_reprompt_when_claude_backend_unchanged(self, tmp_path, monkeypatch):
+    def test_prompt_fires_with_valid_existing_as_prefill(self, tmp_path, monkeypatch):
         """
-        With users.yaml present, DEFAULT_MODEL=sonnet, and the wizard kept
-        on claude, no model prompt fires AND install.conf still emits
-        DEFAULT_MODEL=sonnet (the unconditional-emission half of the fix).
+        With users.yaml present, DEFAULT_MODEL=sonnet, and the wizard
+        kept on claude, the model prompt STILL fires and the existing
+        value is passed as the prefill. The operator's choice (from
+        the helper return) lands in install.conf. Pins the contract
+        that the operator can always edit the global model via
+        `make config`, not just when it is invalid for the backend.
         """
         self._setup(monkeypatch, tmp_path, existing_env={"DEFAULT_MODEL": "sonnet"})
         helper, env = self._run(
             monkeypatch,
             tmp_path,
             self._inputs_for_claude_backend(),
-            helper_return="should-not-be-used",
+            helper_return="haiku",
         )
-        helper.assert_not_called()
-        assert env["DEFAULT_MODEL"] == "sonnet"
+        helper.assert_called_once()
+        # Prefill is the existing value because it validates for claude.
+        assert helper.call_args.args[0] == "claude"
+        assert helper.call_args.args[1] == "anthropic"
+        assert helper.call_args.args[2] == "sonnet"
+        assert env["DEFAULT_MODEL"] == "haiku"
 
     def test_reprompts_on_empty_existing_model_claude(self, tmp_path, monkeypatch):
         """
@@ -6128,6 +6172,136 @@ class TestStripInstallConfKeys:
         _strip_install_conf_keys("users_yaml_staging_path")
 
 
+# ── _cmd_config: global-default prompts fire regardless of users.yaml ──
+
+
+class TestCmdConfigGlobalDefaultsRegardlessOfUsersYaml:
+    """Pins the contract that installation-wide defaults (DEFAULT_MODEL,
+    AGENT_TIMEOUT_SECONDS, BUDGET_CEILING on non-claude, CLAUDE_MAX_CONTEXT_WINDOW,
+    WORKSPACE_BASE, PR_REVIEW_COOLDOWN) prompt on every wizard run and
+    land in install.conf's env regardless of users.yaml presence.
+
+    The pre-fix wizard gated those prompts on `not users_yaml_exists`
+    so a re-run on an existing install silently kept stale globals - the
+    operator-visible bug was a backend switch leaving DEFAULT_MODEL set
+    to a model from the prior backend's surface. Each test below
+    exercises one global-default key on the users-yaml-exists branch
+    and asserts the new value lands.
+    """
+
+    @staticmethod
+    def _existing_etc_users(monkeypatch):
+        TestCmdConfig._simulate_existing_etc_users_yaml(
+            monkeypatch,
+            "users:\n  - telegram_id: 1\n    name: alice\n    role: admin\n",
+        )
+
+    def test_agent_timeout_lands_with_users_yaml(self, tmp_path, monkeypatch):
+        """AGENT_TIMEOUT_SECONDS reaches env when users.yaml is present."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._existing_etc_users(monkeypatch)
+
+        inputs = iter(TestCmdConfigDefaultModelDispatch._inputs_for_claude_backend())
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            lambda backend, prov, default: "sonnet",
+        )
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        assert env["AGENT_TIMEOUT_SECONDS"] == "120"
+
+    def test_max_context_window_lands_with_users_yaml(self, tmp_path, monkeypatch):
+        """CLAUDE_MAX_CONTEXT_WINDOW reaches env when users.yaml is present.
+
+        Pre-fix: the env emission was gated on `not users_yaml_exists`,
+        so the prompt fired but the value never made it to install.conf.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._existing_etc_users(monkeypatch)
+
+        inputs = iter(TestCmdConfigDefaultModelDispatch._inputs_for_claude_backend())
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            lambda backend, prov, default: "sonnet",
+        )
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        assert env["CLAUDE_MAX_CONTEXT_WINDOW"] == "200000"
+
+    def test_workspace_base_lands_with_users_yaml(self, tmp_path, monkeypatch):
+        """WORKSPACE_BASE reaches env when users.yaml is present."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._existing_etc_users(monkeypatch)
+
+        inputs = iter(TestCmdConfigDefaultModelDispatch._inputs_for_claude_backend())
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            lambda backend, prov, default: "sonnet",
+        )
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        assert env["WORKSPACE_BASE"] == "~/Projects"
+
+    def test_pr_review_cooldown_always_prompts(self, tmp_path, monkeypatch):
+        """PR_REVIEW_COOLDOWN is a global resource control: the prompt
+        fires whether users.yaml exists or pr_review_enabled is true,
+        and a non-default value lands in env.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._existing_etc_users(monkeypatch)
+
+        # Override the cooldown slot in the claude chain to a non-default
+        # value so the env-emission assertion is meaningful (the default
+        # "300" is suppressed by the delta-from-default check).
+        base = list(TestCmdConfigDefaultModelDispatch._inputs_for_claude_backend())
+        cooldown_idx = base.index("300")
+        base[cooldown_idx] = "450"
+        inputs = iter(base)
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            lambda backend, prov, default: "sonnet",
+        )
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        assert env["PR_REVIEW_COOLDOWN"] == "450"
+
+    def test_budget_ceiling_lands_with_users_yaml_on_non_claude(self, tmp_path, monkeypatch):
+        """BUDGET_CEILING reaches env on non-claude backends when
+        users.yaml exists. Claude-branch budget suppression is unchanged.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kai.install.INSTALL_CONF", tmp_path / "install.conf")
+        monkeypatch.setattr("kai.install.PROJECT_ROOT", tmp_path)
+        self._existing_etc_users(monkeypatch)
+
+        inputs = iter(TestCmdConfigDefaultModelDispatch._inputs_for_goose_openai())
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+        monkeypatch.setattr(
+            "kai.install._prompt_default_model",
+            lambda backend, prov, default: "gpt-5.4",
+        )
+        _cmd_config()
+
+        env = json.loads((tmp_path / "install.conf").read_text())["env"]
+        assert env["BUDGET_CEILING"] == "10.0"
+
+
 # ── _cmd_config: users.yaml canonicalization ─────────────────────────
 
 
@@ -6165,6 +6339,7 @@ class TestCmdConfigCanonicalUsersYaml:
             "~/Projects",
             "",
             "false",
+            "300",  # pr review cooldown (global resource control)
             "900",
             "1.0",
             "false",

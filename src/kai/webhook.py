@@ -57,7 +57,7 @@ from aiohttp import web
 from telegram import Bot, Update
 
 from kai import cron, memory, review, services, sessions, triage
-from kai.config import DATA_DIR, IMAGE_EXTENSIONS, Config, UserConfig
+from kai.config import DATA_DIR, IMAGE_EXTENSIONS, Config, ModelRole, UserConfig, resolve_user_model
 from kai.telegram_utils import chunk_text
 
 log = logging.getLogger(__name__)
@@ -715,6 +715,18 @@ async def _process_github_event_for_user(
     else:
         provider = config.llm_provider
 
+    # Per-role model overrides for review and triage. `resolve_user_model`
+    # implements the full precedence chain: per-user `models:` from
+    # users.yaml > Config.default_models from DEFAULT_MODELS_JSON >
+    # MODEL_REGISTRY's (backend, provider, role) default. review.py /
+    # triage.py treat the empty string as "fall through to the registry
+    # default" via the model_override parameter; the resolver always
+    # returns a concrete model string, so the override path here is
+    # load-bearing only when the resolved value differs from the
+    # registry default (which is exactly when it should fire).
+    pr_review_model_override = resolve_user_model(ModelRole.PR_REVIEW, user_config, config)
+    issue_triage_model_override = resolve_user_model(ModelRole.ISSUE_TRIAGE, user_config, config)
+
     # ── PR review routing ────────────────────────────────────────
     # When PR review is enabled for this user, reviewable PR events
     # (opened, reopened, synchronize) are routed to the review pipeline
@@ -764,6 +776,7 @@ async def _process_github_event_for_user(
                     provider=provider,
                     timeout_s=request.app["pr_review_timeout_s"],
                     budget_usd=request.app["pr_review_budget_usd"],
+                    model_override=pr_review_model_override,
                 )
             )
             _background_tasks.add(task)
@@ -810,6 +823,7 @@ async def _process_github_event_for_user(
                     notify_chat_id=target_chat_id,
                     agent_backend=agent_backend,
                     provider=provider,
+                    model_override=issue_triage_model_override,
                 )
             )
             _background_tasks.add(task)

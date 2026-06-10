@@ -4,16 +4,16 @@ SQLite database layer for sessions, jobs, settings, and workspace history.
 Provides async CRUD operations for all persistent state in Kai, organized
 into four tables:
 
-1. **sessions** — Claude Code session tracking (session ID, model, cost).
+1. **sessions** - Agent session tracking (session ID, model, cost).
    One row per chat_id, upserted on each response. Cost accumulates across
    the lifetime of a session.
 
-2. **jobs** — Scheduled tasks (reminders, Claude jobs, conditional monitors).
-   Created via the scheduling API (POST /api/schedule) or inner Claude's curl.
+2. **jobs** - Scheduled tasks (reminders, agent jobs with job_type "claude", conditional monitors).
+   Created via the scheduling API (POST /api/schedule) or the inner agent's curl.
    Jobs have a schedule_type (once/daily/interval) and can be deactivated
    without deletion to preserve history.
 
-3. **settings** — Generic key-value store for persistent config. Used for
+3. **settings** - Generic key-value store for persistent config. Used for
    workspace path, voice mode/name preferences, and future extensibility.
    Keys are namespaced strings like "voice_mode:{chat_id}".
 
@@ -202,7 +202,7 @@ async def init_db(db_path: Path) -> None:
 
 
 async def get_session(chat_id: int) -> str | None:
-    """Get the current Claude session ID for a chat, or None if no session exists."""
+    """Get the current agent session ID for a chat, or None if no session exists."""
     async with _get_db().execute("SELECT session_id FROM sessions WHERE chat_id = ?", (chat_id,)) as cursor:
         row = await cursor.fetchone()
         return row["session_id"] if row else None
@@ -210,14 +210,14 @@ async def get_session(chat_id: int) -> str | None:
 
 async def save_session(chat_id: int, session_id: str, model: str, cost_usd: float) -> None:
     """
-    Save or update a Claude session for a chat.
+    Save or update an agent session for a chat.
 
     On conflict (existing chat_id), the session_id and model are updated,
     last_used_at is refreshed, and total_cost_usd is accumulated (not replaced).
 
     Args:
         chat_id: Telegram chat ID.
-        session_id: Claude session identifier from the stream-json response.
+        session_id: Agent session identifier reported by the backend.
         model: Model name used for this session (e.g., "sonnet").
         cost_usd: Cost of this particular interaction (added to running total).
     """
@@ -273,8 +273,8 @@ async def create_job(
     Args:
         chat_id: Telegram chat ID that owns this job.
         name: Human-readable job name (shown in /jobs).
-        job_type: "reminder" (sends prompt as-is) or "claude" (processed by Claude).
-        prompt: Message text for reminders, or Claude prompt for Claude jobs.
+        job_type: "reminder" (sends prompt as-is) or "claude" (processed by the agent backend).
+        prompt: Message text for reminders, or the agent prompt for agent-type jobs.
         schedule_type: "once", "daily", or "interval".
         schedule_data: JSON string with schedule details.
             once: {"run_at": "ISO-datetime"}

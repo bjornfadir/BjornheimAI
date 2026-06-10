@@ -2464,10 +2464,13 @@ class TestCodexModelsSurface:
 
         assert CODEX_DEFAULT_MODEL == "gpt-5.5"
 
-    def test_provider_defaults_openai_unchanged(self):
+    def test_provider_defaults_openai_is_strongest_available(self):
+        """PROVIDER_DEFAULTS["openai"] points at the OpenAI API's
+        single strongest text model (per the agent-role-strongest
+        rule). Verified 2026-06-09 against developers.openai.com."""
         from kai.config import PROVIDER_DEFAULTS
 
-        assert PROVIDER_DEFAULTS["openai"] == "gpt-5.4"
+        assert PROVIDER_DEFAULTS["openai"] == "gpt-5.5-pro"
 
 
 class TestValidateModelForBackend:
@@ -3326,6 +3329,100 @@ class TestNoAdHocOneShotBackendTuples:
         )
 
 
+class TestProviderDefaultsStrongestModel:
+    """`PROVIDER_DEFAULTS` drives the wizard's conversational-model
+    prompt suggestion. Per the agent-role-strongest rule, each entry
+    must name the strongest curated model the provider offers; the
+    non-agent roles use the tier scheme elsewhere where balanced /
+    cheap tiers split per role.
+    """
+
+    def test_anthropic_default_is_opus(self):
+        """Opus is the strongest tier in PROVIDER_MODELS['anthropic']."""
+        from kai.config import PROVIDER_DEFAULTS
+
+        assert PROVIDER_DEFAULTS["anthropic"] == "opus"
+
+    def test_openai_default_is_strongest(self):
+        """gpt-5.5-pro is the single strongest text model on the
+        OpenAI API per developers.openai.com (verified 2026-06-09).
+        Above the gpt-5.5 / 5.4-pro / 5.4 / 5.4-mini / 5.4-nano line."""
+        from kai.config import PROVIDER_DEFAULTS, PROVIDER_MODELS
+
+        assert PROVIDER_DEFAULTS["openai"] in PROVIDER_MODELS["openai"]
+        assert PROVIDER_DEFAULTS["openai"] == "gpt-5.5-pro"
+
+    def test_google_default_is_pro(self):
+        """gemini-2.5-pro is the most advanced Gemini for complex
+        tasks per ai.google.dev/gemini-api/docs/models (verified
+        2026-06-09). The 3.x family is mostly Preview / specialized."""
+        from kai.config import PROVIDER_DEFAULTS
+
+        assert PROVIDER_DEFAULTS["google"] == "gemini-2.5-pro"
+
+    def test_deepseek_default_is_v4_pro(self):
+        """V4 Pro is the strongest first-class OpenCode-on-DeepSeek
+        model. V4 Flash is the speed tier. The legacy `deepseek-chat`
+        alias is deprecated and not used as a default."""
+        from kai.config import PROVIDER_DEFAULTS
+
+        assert PROVIDER_DEFAULTS["deepseek"] == "deepseek-v4-pro"
+
+    def test_every_default_is_in_provider_models(self):
+        """Every default must be a key in PROVIDER_MODELS for the
+        same provider; without this invariant the wizard's
+        _prompt_choice would fail when offered the default as the
+        pre-selected entry."""
+        from kai.config import PROVIDER_DEFAULTS, PROVIDER_MODELS
+
+        for provider, model in PROVIDER_DEFAULTS.items():
+            assert provider in PROVIDER_MODELS, f"PROVIDER_MODELS missing entry for {provider!r}"
+            assert model in PROVIDER_MODELS[provider], (
+                f"PROVIDER_DEFAULTS[{provider!r}]={model!r} is not in PROVIDER_MODELS[{provider!r}]"
+            )
+
+
+class TestDeepSeekRegistryRowsAvoidDeprecatedAlias:
+    """The `deepseek-chat` and `deepseek-reasoner` aliases are
+    deprecated by DeepSeek and retire 2026-07-24. The registry
+    must use the canonical V4 SKUs instead."""
+
+    _DEPRECATED_NAMES = ("deepseek-chat", "deepseek-reasoner")
+
+    def test_opencode_deepseek_rows_use_v4_skus(self):
+        for role in ModelRole:
+            value = MODEL_REGISTRY[("opencode", "deepseek", role)]
+            for deprecated in self._DEPRECATED_NAMES:
+                assert deprecated not in value, (
+                    f"opencode/deepseek/{role.value}={value!r} contains deprecated alias {deprecated!r}"
+                )
+            assert value.startswith("deepseek/deepseek-v4-"), (
+                f"opencode/deepseek/{role.value}={value!r} should resolve to a V4 SKU"
+            )
+
+    def test_goose_deepseek_rows_use_v4_skus(self):
+        for role in ModelRole:
+            value = MODEL_REGISTRY[("goose", "deepseek", role)]
+            for deprecated in self._DEPRECATED_NAMES:
+                assert deprecated not in value, (
+                    f"goose/deepseek/{role.value}={value!r} contains deprecated alias {deprecated!r}"
+                )
+            assert value.startswith("deepseek-v4-"), f"goose/deepseek/{role.value}={value!r} should resolve to a V4 SKU"
+
+    def test_balanced_and_cheap_tiers_differ_on_deepseek(self):
+        """Both tiers collapsed onto `deepseek-chat` before this fix;
+        re-pinning the tier distinction prevents a future regression."""
+        opencode_balanced = MODEL_REGISTRY[("opencode", "deepseek", ModelRole.PR_REVIEW)]
+        opencode_cheap = MODEL_REGISTRY[("opencode", "deepseek", ModelRole.MEMORY_EXTRACTION)]
+        assert opencode_balanced != opencode_cheap, (
+            "opencode/deepseek balanced and cheap tiers must resolve to different models"
+        )
+
+        goose_balanced = MODEL_REGISTRY[("goose", "deepseek", ModelRole.PR_REVIEW)]
+        goose_cheap = MODEL_REGISTRY[("goose", "deepseek", ModelRole.MEMORY_EXTRACTION)]
+        assert goose_balanced != goose_cheap, "goose/deepseek balanced and cheap tiers must resolve to different models"
+
+
 class TestBackendProviders:
     """`BACKEND_PROVIDERS` is the single authoritative (backend, provider)
     allowlist. `BACKENDS_NEEDING_PROVIDER_PROMPT` is derived from it
@@ -3401,8 +3498,16 @@ class TestModelRegistryTripleKey:
         _BACKEND_PROVIDER_TIER_MODELS tweak surfaces here in addition
         to the larger acceptance loop above."""
         assert MODEL_REGISTRY[("claude", "anthropic", ModelRole.PR_REVIEW)] == "sonnet"
-        assert MODEL_REGISTRY[("codex", "openai", ModelRole.PR_REVIEW)] == "gpt-5.4-mini"
-        assert MODEL_REGISTRY[("opencode", "deepseek", ModelRole.PR_REVIEW)] == "deepseek/deepseek-chat"
+        # codex balanced tier picks the current frontier (gpt-5.5);
+        # cheap tier stays at gpt-5.4-mini for high-volume roles.
+        assert MODEL_REGISTRY[("codex", "openai", ModelRole.PR_REVIEW)] == "gpt-5.5"
+        assert MODEL_REGISTRY[("codex", "openai", ModelRole.MEMORY_EXTRACTION)] == "gpt-5.4-mini"
+        # opencode-on-deepseek balanced tier resolves to V4 Pro for
+        # the reasoning-heavy PR review role; V4 Flash covers the
+        # cheap tier elsewhere. The legacy `deepseek-chat` alias is
+        # deprecated and not used here.
+        assert MODEL_REGISTRY[("opencode", "deepseek", ModelRole.PR_REVIEW)] == "deepseek/deepseek-v4-pro"
+        assert MODEL_REGISTRY[("opencode", "deepseek", ModelRole.MEMORY_EXTRACTION)] == "deepseek/deepseek-v4-flash"
         assert MODEL_REGISTRY[("goose", "anthropic", ModelRole.PR_REVIEW)] == "claude-sonnet-4-6"
 
     def test_codex_rows_are_in_codex_models(self):

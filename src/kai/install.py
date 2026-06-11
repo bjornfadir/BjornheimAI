@@ -2857,36 +2857,69 @@ def _generate_launcher_script(install_dir: str, webhook_port: int = 8080) -> str
         # creating a grandchild process with a new PID. Launchd tracks this
         # bash script instead, and we forward signals to the real Python.
         {install_dir}/venv/bin/python3 -m kai &
-
-        # Wait for Python to re-exec and start listening
-        sleep 2
-
-        # Find the actual Python process (the re-exec'd grandchild).
-        # lsof lives at /usr/sbin/ which may not be in the service PATH.
-        REAL_PID=$(/usr/sbin/lsof -ti :{webhook_port} -sTCP:LISTEN 2>/dev/null)
-        if [ -z "$REAL_PID" ]; then
-            # Hasn't bound yet; wait a bit more
-            sleep 3
-            REAL_PID=$(/usr/sbin/lsof -ti :{webhook_port} -sTCP:LISTEN 2>/dev/null)
-        fi
+        CHILD_PID=$!
 
         cleanup() {{
-            kill -TERM "$REAL_PID" 2>/dev/null
-            # Poll until the process is gone (can't use wait on non-children)
-            while kill -0 "$REAL_PID" 2>/dev/null; do sleep 0.5; done
+            # Ignore further TERM/INT while tearing down so the group
+            # signal below does not re-enter this handler.
+            trap '' TERM INT
+            # Signal the launcher's whole process group: launchd runs
+            # this script as its own group leader and non-interactive
+            # bash creates no job-control groups, so the python child,
+            # its re-exec'd grandchild, and any helper sleeps all share
+            # the group (fork and exec both preserve the pgid). The
+            # group signal is the only handle that reaches a python
+            # that has re-exec'd but not yet bound the port; in that
+            # window it has no individually resolvable pid. Fall back
+            # to the direct child if this shell is somehow not a group
+            # leader.
+            kill -TERM -- -$$ 2>/dev/null || kill -TERM "$CHILD_PID" 2>/dev/null
+            # Wait for the webhook port to be released so the stop is
+            # not reported complete while a dying python still holds
+            # the port a successor will need.
+            while [ -n "$(/usr/sbin/lsof -ti :{webhook_port} -sTCP:LISTEN 2>/dev/null)" ]; do sleep 0.5; done
+            exit 0
         }}
+        # Installed BEFORE the bind poll: a service stop during the
+        # (up to 120s) startup window must still tear the agent down;
+        # with the default TERM action bash would exit alone and
+        # orphan the starting python.
         trap cleanup TERM INT
+
+        # Find the actual Python process (the re-exec'd grandchild) by
+        # its listen port. lsof lives at /usr/sbin/ which may not be in
+        # the service PATH. Healthy startups bind in 15-25 seconds on
+        # this stack (the memory subsystem loads its embedding model
+        # before the webhook server starts), so poll for up to 120s.
+        # The direct child exits on the framework re-exec in normal
+        # operation, so child death alone is not a failure signal;
+        # only the port answers whether the agent came up.
+        REAL_PID=""
+        for _ in $(seq 1 60); do
+            REAL_PID=$(/usr/sbin/lsof -ti :{webhook_port} -sTCP:LISTEN 2>/dev/null)
+            [ -n "$REAL_PID" ] && break
+            sleep 2
+        done
+
+        if [ -z "$REAL_PID" ]; then
+            # No listener after the window: startup is dead (a
+            # fail-closed config gate, a crash, or a hang that is
+            # indistinguishable from one). Kill the process group so a
+            # python that would bind AFTER the window cannot linger as
+            # an orphan holding the port, then exit non-zero so
+            # launchd's KeepAlive restarts the service - a throttled,
+            # visible retry loop instead of an eternal sleep that
+            # reports state=running with no agent behind it.
+            echo "kai launcher: no listener on :{webhook_port} after 120s; exiting so launchd restarts the service" >&2
+            trap '' TERM INT
+            kill -TERM -- -$$ 2>/dev/null || kill -TERM "$CHILD_PID" 2>/dev/null
+            exit 1
+        fi
 
         # Poll for the real Python process to exit.
         # kill -0 checks if PID exists without sending a signal.
         # This is macOS-compatible (no GNU tail --pid needed).
-        if [ -n "$REAL_PID" ]; then
-            while kill -0 "$REAL_PID" 2>/dev/null; do sleep 1; done
-        else
-            # Could not find the process; wait indefinitely.
-            # BSD sleep doesn't support "infinity", so loop with a long sleep.
-            while true; do sleep 86400; done
-        fi
+        while kill -0 "$REAL_PID" 2>/dev/null; do sleep 1; done
     """)
 
 

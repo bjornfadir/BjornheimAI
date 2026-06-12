@@ -198,3 +198,159 @@ class TestActiveMemoryProjectDataclass:
         assert active.matched_root == root
         assert active.memory_enabled is True
         assert active.default_scope_for_new_facts == "project"
+
+
+# ── DB registry cache and merge ──────────────────────────────────────
+
+
+from kai.memory_projects import (  # noqa: E402
+    db_registry_creator,
+    db_registry_remove,
+    db_registry_upsert,
+    load_db_registry,
+    merged_registry,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_db_registry():
+    """The DB registry cache is module-level state; tests must not
+    leak entries into each other (or into the detector tests above,
+    which assume a YAML-only world)."""
+    load_db_registry([])
+    yield
+    load_db_registry([])
+
+
+def _row(project_id: str, root, *, created_by: int = 123, **overrides) -> dict:
+    row = {
+        "project_id": project_id,
+        "display_name": project_id.capitalize(),
+        "workspace_root": str(root),
+        "memory_enabled": True,
+        "default_scope_for_new_facts": "project",
+        "created_by": created_by,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestDbRegistryCache:
+    def test_load_and_merge_with_empty_yaml(self, tmp_path):
+        root = tmp_path / "phi"
+        root.mkdir()
+        load_db_registry([_row("phi", root)])
+        merged = merged_registry({})
+        assert set(merged) == {"phi"}
+        assert merged["phi"].workspace_roots == (root.resolve(),)
+        assert merged["phi"].default_scope_for_new_facts == "project"
+        assert db_registry_creator("phi") == 123
+
+    def test_empty_db_returns_yaml_dict_unchanged(self, tmp_path):
+        """The pre-registration call sites must behave byte-
+        identically: with no DB rows the merge returns the exact
+        yaml dict object, not a copy."""
+        root = tmp_path / "kai"
+        root.mkdir()
+        yaml_projects = {"kai": _project("kai", root)}
+        assert merged_registry(yaml_projects) is yaml_projects
+
+    def test_yaml_wins_on_project_id(self, tmp_path):
+        yaml_root = tmp_path / "kai-yaml"
+        yaml_root.mkdir()
+        db_root = tmp_path / "kai-db"
+        db_root.mkdir()
+        load_db_registry([_row("kai", db_root)])
+        merged = merged_registry({"kai": _project("kai", yaml_root)})
+        assert merged["kai"].workspace_roots == (yaml_root.resolve(),)
+
+    def test_yaml_wins_on_root_ownership(self, tmp_path):
+        """A DB project whose root is already owned by a YAML project
+        is dropped entirely; a user registration can never steal an
+        operator-pinned root under a different id."""
+        root = tmp_path / "kai"
+        root.mkdir()
+        load_db_registry([_row("kai-imposter", root)])
+        merged = merged_registry({"kai": _project("kai", root)})
+        assert "kai-imposter" not in merged
+        assert set(merged) == {"kai"}
+
+    def test_yaml_parent_evicts_persisted_db_child_root(self, tmp_path):
+        """Containment, not just equality: a persisted DB root INSIDE
+        a later-pinned YAML root would win that subtree via
+        longest-prefix detection, so the merge must evict it. The
+        register-time nested guard cannot catch this ordering (the
+        DB row predates the YAML pin); the merge is the only gate."""
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        deep = child / "src"
+        deep.mkdir(parents=True)
+        load_db_registry([_row("child", child)])
+        merged = merged_registry({"parent": _project("parent", parent)})
+        assert "child" not in merged
+        active = detect_active_memory_project(deep, merged)
+        assert active is not None
+        assert active.project_id == "parent"
+
+    def test_yaml_child_inside_db_parent_coexists(self, tmp_path):
+        """The inverse direction is ordinary nested-project
+        coexistence: a deeper YAML root owns its subtree through
+        longest-prefix while the DB parent keeps the surrounding
+        area, exactly like nested YAML entries."""
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+        load_db_registry([_row("parent", parent)])
+        merged = merged_registry({"child": _project("child", child)})
+        assert set(merged) == {"parent", "child"}
+        inside_child = detect_active_memory_project(child, merged)
+        assert inside_child is not None and inside_child.project_id == "child"
+        inside_parent = detect_active_memory_project(parent, merged)
+        assert inside_parent is not None and inside_parent.project_id == "parent"
+
+    def test_upsert_and_remove_visible_immediately(self, tmp_path):
+        """Restart-free contract: cache mutations show up in the very
+        next merged_registry call."""
+        root = tmp_path / "anvil"
+        root.mkdir()
+        assert db_registry_upsert(_row("anvil", root, created_by=456)) is True
+        assert "anvil" in merged_registry({})
+        assert db_registry_creator("anvil") == 456
+        db_registry_remove("anvil")
+        assert merged_registry({}) == {}
+        assert db_registry_creator("anvil") is None
+
+    @pytest.mark.parametrize(
+        "bad_overrides",
+        [
+            {"project_id": ""},
+            {"project_id": None},
+            {"display_name": ""},
+            {"memory_enabled": "true"},
+            {"default_scope_for_new_facts": "task"},
+            {"workspace_root": ""},
+        ],
+    )
+    def test_malformed_rows_skipped_fail_closed(self, tmp_path, bad_overrides):
+        """Validation parity with the YAML loader: a row the loader
+        would have skipped never reaches detection, and never
+        crashes the load."""
+        root = tmp_path / "phi"
+        root.mkdir()
+        row = _row("phi", root)
+        row.update(bad_overrides)
+        load_db_registry([row])
+        assert merged_registry({}) == {}
+
+    def test_detection_through_merged_registry(self, tmp_path):
+        """End-to-end with the detector: a cached DB project is
+        detectable exactly like a YAML one."""
+        root = tmp_path / "phi"
+        root.mkdir()
+        sub = root / "src"
+        sub.mkdir()
+        load_db_registry([_row("phi", root)])
+        active = detect_active_memory_project(sub, merged_registry({}))
+        assert active is not None
+        assert active.project_id == "phi"
+        assert active.matched_root == root.resolve()

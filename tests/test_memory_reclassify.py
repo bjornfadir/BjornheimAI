@@ -906,3 +906,115 @@ class TestRollback:
         assert code == 1
         assert fetches == []
         assert env["updates"] == []
+
+
+# ── Transcript provenance in the report ─────────────────────────────
+
+
+class TestReportProvenanceQuote:
+    def _proposals(self):
+        return [
+            memory_reclassify.Proposal(
+                memory_id=f"m{i}",
+                verdict="project" if i % 2 else "global",
+                project_id="kai" if i % 2 else None,
+                confidence=0.9,
+                reason=f"reason {i}",
+                prior_scope_source="legacy_default",
+                text_sha256="ab",
+            )
+            for i in range(3)
+        ]
+
+    def test_present_entries_render_said_line(self):
+        proposals = self._proposals()
+        report = memory_reclassify.render_report(
+            run_id="rs-test",
+            user_id="100",
+            backend="claude",
+            threshold=0.8,
+            scanned=3,
+            selected=3,
+            proposals=proposals,
+            skips={},
+            sample_size=3,
+            texts={p.memory_id: f"text {p.memory_id}" for p in proposals},
+            provenance_user_texts={"m0": "what did the user actually say"},
+        )
+        assert 'said:   "what did the user actually say"' in report
+        # The other two proposals (no entry) render unchanged.
+        assert report.count("said:") == 1
+
+    def test_no_provenance_argument_renders_identically(self):
+        """The optional kwarg defaults to None; older callers see the
+        original report shape."""
+        proposals = self._proposals()
+        kwargs = dict(
+            run_id="rs-test",
+            user_id="100",
+            backend="claude",
+            threshold=0.8,
+            scanned=3,
+            selected=3,
+            proposals=proposals,
+            skips={},
+            sample_size=3,
+            texts={p.memory_id: f"text {p.memory_id}" for p in proposals},
+        )
+        without = memory_reclassify.render_report(**kwargs)
+        with_empty = memory_reclassify.render_report(**kwargs, provenance_user_texts={})
+        assert without == with_empty
+        assert "said:" not in without
+
+
+class TestReportProvenanceQuoteOwnership:
+    """A forged or restored row whose source_chat_id points at another
+    chat must not contribute a quote to the dry-run report."""
+
+    def test_cross_chat_pointer_skipped(self, monkeypatch, tmp_path):
+        from kai import memory as memory_module
+
+        # The proposal's source row carries provenance whose chat_id
+        # is 2; the CLI is running for user_id="1". Even if a JSONL
+        # entry happens to line up, the helper must refuse before any
+        # filesystem read and the report must not quote it.
+        path = tmp_path / "history" / "2" / "2026-06-13.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"ts": "2026-06-13T09:00:00+00:00", "dir": "user", "chat_id": 2, "text": "secret"}\n')
+
+        # Redirect history dir so the helper looks at our fixture.
+        from kai import history
+
+        monkeypatch.setattr(history, "_LOG_DIR", tmp_path / "history")
+
+        fact = MemoryResult(
+            id="m1",
+            text="row body",
+            score=0.0,
+            memory_type="fact",
+            metadata={
+                "source": "extracted",
+                "tags": ["t"],
+                "confidence": 0.9,
+                memory_module.SOURCE_CHAT_ID_KEY: 2,
+                memory_module.SOURCE_DATE_KEY: "2026-06-13",
+                memory_module.SOURCE_USER_TS_KEY: "2026-06-13T09:00:00+00:00",
+                memory_module.SOURCE_USER_TEXT_SHA256_KEY: __import__("hashlib").sha256(b"secret").hexdigest(),
+                memory_module.SOURCE_ASSISTANT_TS_KEY: "2026-06-13T09:00:30+00:00",
+            },
+            created_at="",
+        )
+        from kai.memory import resolve_memory_scope
+
+        resolved = resolve_memory_scope(fact.metadata)
+        proposal = memory_reclassify.Proposal(
+            memory_id="m1",
+            verdict="global",
+            project_id=None,
+            confidence=0.9,
+            reason="r",
+            prior_scope_source="legacy_default",
+            text_sha256="ab",
+        )
+        quotes = memory_reclassify._collect_provenance_quotes([(fact, resolved)], [proposal], user_id="1")
+        assert quotes == {}

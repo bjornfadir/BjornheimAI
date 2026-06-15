@@ -258,6 +258,167 @@ class TestTruncateForTelegram:
         assert _truncate_for_telegram(text, 50) == text
 
 
+# ── _stream_publishable_prefix ──────────────────────────────────────
+
+
+class TestStreamPublishablePrefix:
+    """
+    Stability filter applied to live streaming updates. The helper
+    returns the longest stable prefix of the accumulated text, or None
+    when nothing in the buffer is safe to publish yet. Backends keep
+    emitting; the transport just waits for a coherent boundary.
+    """
+
+    def test_rejects_empty_text(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("") is None
+        assert _stream_publishable_prefix("   \n  \t  ") is None
+
+    def test_rejects_single_initial_word(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("One") is None
+
+    def test_cuts_dangling_suffix_to_paragraph(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("Complete paragraph.\n\nOne") == "Complete paragraph."
+
+    def test_allows_complete_sentence(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("One complete sentence.") == "One complete sentence."
+
+    def test_includes_closing_sentence_punctuation(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix('He said "Yes."') == 'He said "Yes."'
+
+    def test_cuts_dangling_list_item_to_previous_item(self):
+        from kai.bot import _stream_publishable_prefix
+
+        text = "- Item one\n- Item two\n- Three"
+        assert _stream_publishable_prefix(text) == "- Item one\n- Item two"
+
+    def test_rejects_open_fenced_code_block(self):
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("```python\nprint('hi')") is None
+
+    def test_allows_closed_fenced_code_block(self):
+        from kai.bot import _stream_publishable_prefix
+
+        text = "```python\nprint('hi')\n```"
+        assert _stream_publishable_prefix(text) == text
+
+    def test_rejects_open_inline_code(self):
+        from kai.bot import _stream_publishable_prefix
+
+        # Single unmatched backtick mid-final-line is dangling.
+        assert _stream_publishable_prefix("Use the `cmd flag") is None
+
+    def test_rejects_open_link(self):
+        from kai.bot import _stream_publishable_prefix
+
+        # Final line has an unmatched `[` so the link target is mid-stream.
+        assert _stream_publishable_prefix("See [the docs") is None
+
+    def test_long_span_fallback_when_no_smaller_boundary(self):
+        from kai.bot import _stream_publishable_prefix
+
+        # 240+ chars of prose on one line, then a newline and a final
+        # tiny dangling word. No paragraph break, no sentence end inside
+        # the prose, no list. Long-span fallback must release the prose
+        # block while withholding the dangling final line.
+        prose = "alpha beta gamma " * 16  # 272 chars
+        text = prose + "\nOne"
+        result = _stream_publishable_prefix(text)
+        assert result is not None
+        assert result == prose.rstrip()
+
+    def test_full_rejects_long_unfinished_final_paragraph(self):
+        """A completed paragraph followed by a long mid-sentence fragment
+        must publish only the completed paragraph. The full candidate is
+        longer than the paragraph cut, so without a tight final-line guard
+        it would win the priority sort and ship the in-progress fragment.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        text = "Complete paragraph.\n\nOne hard inconsistency is emerging"
+        assert _stream_publishable_prefix(text) == "Complete paragraph."
+
+    def test_long_span_handles_single_line_prose(self):
+        """A long unpunctuated single-line monologue must still produce a
+        streaming surface. Without the single-line fallback in
+        ``_long_span_cut`` the helper has nothing to publish (no
+        paragraph, sentence, list, or fence boundary) and the user sees
+        a stalled live message until a sentence terminator arrives.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        text = ("alpha beta " * 30).rstrip()
+        result = _stream_publishable_prefix(text)
+        assert result is not None
+        # Threshold is 240; the long-span cut must land on a whitespace
+        # at or beyond that, leaving a substantive prefix.
+        assert len(result) >= 240
+        # The cut lands at a whitespace, so the published prefix never
+        # ends with the in-progress trailing word.
+        assert not result.endswith(" ")
+
+    def test_sentence_cut_rejects_mid_token_decimal(self):
+        """A period inside a decimal is not a sentence boundary; the
+        helper must not publish ``"Use Python 3."`` while the stream is
+        still emitting ``"13"``.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("Use Python 3.13") is None
+
+    def test_sentence_cut_rejects_mid_token_path(self):
+        """A period inside a file path (``bot.py``) is not a sentence
+        boundary; the helper must not publish ``"Open src/kai/bot."``
+        while the stream is still emitting ``"py"``.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("Open src/kai/bot.py") is None
+
+    def test_terminating_period_after_internal_dots_is_sentence_end(self):
+        """A period followed by end-of-string IS a sentence boundary,
+        even when the preceding token contains internal dots. The
+        complete version-string sentence publishes as a unit.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("Use Python 3.13.") == "Use Python 3.13."
+
+    def test_ordered_list_marker_is_not_sentence_boundary(self):
+        """The dot in ``1.`` is a list marker, not a sentence end. A
+        single in-progress numbered item must not publish as the bare
+        marker; with the previous sentence-cut rules it would have
+        produced ``"1."`` because the marker period is followed by
+        whitespace and therefore satisfied the new sentence predicate.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        assert _stream_publishable_prefix("1. Item one") is None
+
+    def test_forming_next_marker_releases_previous_items(self):
+        """Numbered items publish as a list once the next item's marker
+        starts emitting, even before the period and content arrive.
+        Without forming-marker awareness, an in-progress next item
+        (just the digits ``3``) would not count as a boundary and the
+        helper would publish only ``1. Item one`` instead of the full
+        ``1. Item one\\n2. Item two``.
+        """
+        from kai.bot import _stream_publishable_prefix
+
+        text = "1. Item one\n2. Item two\n3"
+        assert _stream_publishable_prefix(text) == "1. Item one\n2. Item two"
+
+
 # ── _save_upload ────────────────────────────────────────────────────
 
 
@@ -3474,6 +3635,248 @@ class TestHandleResponse:
         # the patched attribute path; the assertions read from the
         # re-imported `_pending_memory_tasks` reference.
         _ = bot
+
+    # ── Stable-prefix streaming gate ─────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_does_not_create_live_message_for_initial_single_word(self):
+        """First non-empty partial is a single word; gate withholds live message."""
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        claude = _make_mock_claude()
+        claude.send = MagicMock(return_value=_fake_stream(_text_event("One"), _done_event("One final answer.")))
+        ctx = _make_context(claude=claude)
+
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # No live edit ever fired; final answer arrived through _reply_safe
+        # via _send_response. The unstable "One" partial never created a
+        # live message.
+        mock_edit.assert_not_called()
+        published_texts = [c.args[1] for c in mock_reply.call_args_list]
+        assert "One" not in published_texts
+        assert any("One final answer." in t for t in published_texts)
+
+    @pytest.mark.asyncio
+    async def test_does_not_create_live_message_for_bare_numbered_marker(self):
+        """First non-empty partial is a single in-progress numbered item;
+        the stable-prefix gate must withhold the live message. Without
+        the ordered-list-aware sentence cut, the gate would publish the
+        bare marker ``1.`` as if it were a complete sentence.
+        """
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        claude = _make_mock_claude()
+        claude.send = MagicMock(
+            return_value=_fake_stream(
+                _text_event("1. Item one"),
+                _done_event("1. Item one\n2. Item two\n3. Item three"),
+            )
+        )
+        ctx = _make_context(claude=claude)
+
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # No live message edit ever fired; the unstable single in-progress
+        # item never produced a stable-prefix candidate, so the live
+        # message was never created mid-stream.
+        mock_edit.assert_not_called()
+        published_texts = [c.args[1] for c in mock_reply.call_args_list]
+        # The bare marker is the worst Telegram artifact this PR
+        # prevents; no published text may show it.
+        assert "1." not in published_texts
+        assert "1. Item one" not in published_texts
+        # Final delivery still carries the complete answer via _reply_safe.
+        assert any("3. Item three" in t for t in published_texts)
+
+    @pytest.mark.asyncio
+    async def test_publishes_completed_prefix_not_dangling_suffix(self):
+        """Live message uses the completed paragraph, never the dangling word."""
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        claude = _make_mock_claude()
+        claude.send = MagicMock(
+            return_value=_fake_stream(
+                _text_event("Complete paragraph.\n\nOne"),
+                _done_event("Complete paragraph.\n\nOne final answer."),
+            )
+        )
+        ctx = _make_context(claude=claude)
+
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # The live message creation received the completed paragraph
+        # without the dangling "One" suffix.
+        live_create_texts = [c.args[1] for c in mock_reply.call_args_list]
+        assert "Complete paragraph." in live_create_texts
+        # No reply / edit ever showed the bare "Complete paragraph.\n\nOne"
+        # intermediate. (The final delivery edit carries the complete
+        # final answer, not the dangling intermediate.)
+        edit_texts = [c.args[1] for c in mock_edit.call_args_list]
+        assert "Complete paragraph.\n\nOne" not in edit_texts
+        assert "Complete paragraph.\n\nOne" not in live_create_texts
+
+    @pytest.mark.asyncio
+    async def test_edits_only_when_publishable_prefix_advances(self):
+        """A dangling suffix after a stable sentence does not trigger an edit."""
+        from kai.bot import EDIT_INTERVAL, _handle_response
+
+        update = _make_update()
+        live_msg = MagicMock()
+        live_msg.edit_text = AsyncMock()
+        update.message.reply_text = AsyncMock(return_value=live_msg)
+
+        claude = _make_mock_claude()
+        claude.send = MagicMock(
+            return_value=_fake_stream(
+                _text_event("One complete sentence."),
+                _text_event("One complete sentence. Two"),  # dangling suffix
+                _done_event("One complete sentence. Two complete sentences."),
+            )
+        )
+        ctx = _make_context(claude=claude)
+
+        # Patch monotonic so the second event is past EDIT_INTERVAL.
+        times = iter([0.0, EDIT_INTERVAL + 1.0, EDIT_INTERVAL + 2.0, EDIT_INTERVAL + 3.0])
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+            patch("kai.bot.time.monotonic", side_effect=lambda: next(times)),
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # No edit ever published a dangling "Two" mid-stream.
+        edit_texts = [c.args[1] for c in mock_edit.call_args_list]
+        assert not any(t.endswith(" Two") for t in edit_texts)
+        # Final edit carries the complete final text (not the dangling
+        # intermediate).
+        if edit_texts:
+            assert "Two complete sentences." in edit_texts[-1]
+
+    @pytest.mark.asyncio
+    async def test_stop_before_stable_live_message_sends_no_fragment(self):
+        """Stop while only unstable partials seen: no fragment reply, no error reply, stop logged."""
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        stop_event = asyncio.Event()
+
+        async def _streaming(*args):
+            yield _text_event("One")
+            stop_event.set()
+            yield _text_event("One more")  # still unstable
+            yield _done_event("Should not reach")
+
+        claude = _make_mock_claude()
+        claude.send = MagicMock(return_value=_streaming())
+        ctx = _make_context(claude=claude)
+
+        patches = self._base_patches()
+        log_message_mock = patches["log_message"]
+
+        with (
+            patch.multiple("kai.bot", **patches),
+            patch("kai.bot.get_stop_event", return_value=stop_event),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # The unstable "One" partial never created a live message.
+        mock_edit.assert_not_called()
+        # Error fallback was NOT sent. update.message.reply_text is the
+        # entry point for the bare "Error: No response from agent" path
+        # (it bypasses _reply_safe).
+        error_calls = [
+            c
+            for c in update.message.reply_text.call_args_list
+            if c.args and "Error: No response from agent" in c.args[0]
+        ]
+        assert not error_calls
+        # _reply_safe was never called with "One" or "One more".
+        reply_texts = [c.args[1] for c in mock_reply.call_args_list]
+        assert "One" not in reply_texts
+        assert "One more" not in reply_texts
+        # The stop was logged with the canonical marker.
+        stop_log_calls = [c for c in log_message_mock.call_args_list if c.kwargs.get("text") == "[stopped by user]"]
+        assert stop_log_calls, "expected '[stopped by user]' log entry"
+
+    @pytest.mark.asyncio
+    async def test_final_delivery_after_withheld_live_updates(self):
+        """Stream only unstable partials; final delivery still sends the complete answer."""
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        claude = _make_mock_claude()
+        claude.send = MagicMock(
+            return_value=_fake_stream(
+                _text_event("One"),
+                _text_event("One more"),
+                _done_event("One final complete response."),
+            )
+        )
+        ctx = _make_context(claude=claude)
+
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        # No live edits, no fragment replies; only the final delivery.
+        mock_edit.assert_not_called()
+        published_texts = [c.args[1] for c in mock_reply.call_args_list]
+        assert any("One final complete response." in t for t in published_texts)
+
+    @pytest.mark.asyncio
+    async def test_publishes_completed_list_items_not_dangling_next(self):
+        """Live message receives `- Item one\\n- Item two`; the dangling `- Three` is withheld."""
+        from kai.bot import _handle_response
+
+        update = _make_update()
+        claude = _make_mock_claude()
+        claude.send = MagicMock(
+            return_value=_fake_stream(
+                _text_event("- Item one\n- Item two\n- Three"),
+                _done_event("- Item one\n- Item two\n- Three is complete."),
+            )
+        )
+        ctx = _make_context(claude=claude)
+
+        with (
+            patch.multiple("kai.bot", **self._base_patches()),
+            patch("kai.bot._reply_safe", new_callable=AsyncMock) as mock_reply,
+            patch("kai.bot._edit_message_safe", new_callable=AsyncMock) as mock_edit,
+        ):
+            await _handle_response(update, ctx, 12345, "test", claude, "sonnet")
+
+        live_create_texts = [c.args[1] for c in mock_reply.call_args_list]
+        edit_texts = [c.args[1] for c in mock_edit.call_args_list]
+
+        # The live message carried the completed pair, never the
+        # dangling next item.
+        assert "- Item one\n- Item two" in live_create_texts
+        assert "- Item one\n- Item two\n- Three" not in live_create_texts
+        assert "- Item one\n- Item two\n- Three" not in edit_texts
 
 
 # ── _notify_if_queued ────────────────────────────────────────────────

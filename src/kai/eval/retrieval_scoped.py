@@ -557,7 +557,7 @@ def _candidate_rank(hits: list, expected_fact_id: str) -> int | None:
 def _prompt_position(payload_hits: list[dict[str, Any]], expected_fact_id: str) -> int | None:
     """Return the 1-indexed position of `expected_fact_id` in the
     renderer's `payload["hits"]` list. Entries are dicts whose `id`
-    field carries the Mem0 row id (per `_scoped_hit_to_shadow_payload`
+    field carries the Mem0 row id (per `_scoped_hit_to_payload`
     in `kai.memory`). Returns None when the expected fact is not in
     the rendered list at all.
     """
@@ -1551,18 +1551,6 @@ def _initialize_memory() -> bool:
             "format_scoped_context_with_recall_payload (prompt placement).",
             file=sys.stderr,
         )
-        if not config.memory_scoped_recall_enabled:
-            # The scoped read path is NOT live in production for this
-            # install; the harness still runs the scoped pipeline
-            # end-to-end (which is the point of the harness's
-            # existence), but the operator should know the numbers
-            # do not describe the live production behavior here.
-            print(
-                "eval: WARNING: MEMORY_SCOPED_RECALL_ENABLED is off; production "
-                "serves the unscoped pipeline. These results describe the scoped "
-                "pipeline only and not the live production read path on this install.",
-                file=sys.stderr,
-            )
         return True
     except Exception as e:
         print(f"eval: init failed: {e}", file=sys.stderr)

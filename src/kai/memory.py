@@ -643,10 +643,11 @@ class MemoryStats:
 #
 # The shared helper (`retrieve_scoped_memories`, defined after
 # `format_context` below) returns structured candidates plus debug
-# metadata instead of rendering prompt text. Rendering, shadow-mode
-# logging, and the live-prompt switch live in later issues; this
-# layer just owns the admission decision and per-row ranking signals
-# so every future caller can share one filter-before-rank shape.
+# metadata instead of rendering prompt text. Rendering and the
+# memory.recall payload composition live in
+# `format_scoped_context_with_recall_payload`; this layer owns the
+# admission decision and per-row ranking signals so every consumer
+# can share one filter-before-rank shape.
 #
 # The four dataclasses below split the helper's I/O into three
 # concerns: caller context in (ScopedRetrievalContext), per-row
@@ -702,12 +703,12 @@ class ScopedMemoryHit:
     A surviving memory row plus the per-row ranking signals.
 
     The helper computes speaker/confidence/weight/adjusted-score
-    once and carries them here so downstream renderers and
-    shadow-mode loggers do not have to re-parse the metadata or
-    re-multiply the demote factor. `resolved_scope` carries the
-    full read-time scope interpretation so the per-hit channel can
-    surface legacy-default and invalid-default rows without a
-    second audit field on the debug payload.
+    once and carries them here so downstream renderers and the
+    `memory.recall` payload composer do not have to re-parse the
+    metadata or re-multiply the demote factor. `resolved_scope`
+    carries the full read-time scope interpretation so the per-hit
+    channel can surface legacy-default and invalid-default rows
+    without a second audit field on the debug payload.
 
     Attributes:
         result: The raw Mem0 row.
@@ -738,10 +739,12 @@ class ScopedRetrievalDebug:
     """
     Observability payload from `retrieve_scoped_memories`.
 
-    Stable enough that shadow-mode logging (#546) can serialize it
-    directly without changing this helper. The helper itself does
-    not emit `memory.recall` or any other log line; it returns this
-    structure and lets the downstream logger decide what to record.
+    Serialized directly into the `scoped_debug` field of the
+    `memory.recall` payload by `format_scoped_context_with_recall_payload`;
+    the schema is also consumed by the eval harness for per-turn
+    audit. The retrieval helper itself does not emit `memory.recall`
+    or any other log line; it returns this structure and lets the
+    downstream renderer compose the payload.
 
     `reason` carries one of six stable strings:
         disabled               - memory subsystem is disabled or
@@ -794,8 +797,9 @@ class ScopedRetrievalResult:
 
     Bundles the per-row hit list and the debug metadata so the
     helper's two outputs travel through async boundaries as one
-    value. Callers that only need hits read `result.hits`;
-    shadow-mode callers serialize `result.debug`.
+    value. Callers that only need hits read `result.hits`; the
+    payload composer in `format_scoped_context_with_recall_payload`
+    serializes `result.debug` into the `memory.recall` line.
     """
 
     hits: list[ScopedMemoryHit]
@@ -1072,9 +1076,9 @@ def build_scope_metadata(
 
 # Stable exclusion-reason strings returned by
 # `_scoped_memory_admission_reason`. The strings appear as keys in
-# `ScopedRetrievalDebug.excluded_by_scope` and as discriminators in
-# shadow-mode logging, so they must stay stable across refactors -
-# downstream log readers will key on them.
+# `ScopedRetrievalDebug.excluded_by_scope` and feed the
+# `memory.recall` payload's `scoped_debug` block, so they must stay
+# stable across refactors; downstream log readers will key on them.
 _ADMISSION_PROJECT_SCOPE_NOT_ALLOWED = "project_scope_not_allowed"
 _ADMISSION_PROJECT_SCOPE_MISSING_PROJECT_ID = "project_scope_missing_project_id"
 _ADMISSION_PROJECT_ID_MISMATCH = "project_id_mismatch"
@@ -1252,27 +1256,6 @@ def _emit_recall_log(payload: dict[str, object]) -> None:
     aggressively or shift the log level for this module.
     """
     log.info("memory.recall %s", json.dumps(payload, separators=(",", ":")))
-
-
-def _emit_recall_shadow_log(payload: dict[str, object]) -> None:
-    """
-    Write a single memory.recall_shadow log line as compact JSON.
-
-    Companion to `_emit_recall_log` for the #546 shadow-mode
-    comparison line. The two log surfaces are intentionally
-    separate: `memory.recall` is parsed by the existing retrieval
-    eval harness under a stable schema, and overloading it with
-    scoped fields would force a contract migration. Downstream
-    parsers can grep `memory.recall_shadow ` (note trailing space)
-    as a stable tag and json.load the rest.
-
-    Same PII posture as `_emit_recall_log`: query and per-hit
-    snippets are logged in their truncated form (80 chars), not
-    hashed. The shadow line uses the same `_RECALL_QUERY_TRUNC`
-    and `_RECALL_SNIPPET_TRUNC` constants as the legacy line so
-    log volume scales identically.
-    """
-    log.info("memory.recall_shadow %s", json.dumps(payload, separators=(",", ":")))
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -1502,33 +1485,6 @@ def is_enabled() -> bool:
     return _memory is not None
 
 
-def is_recall_shadow_enabled() -> bool:
-    """
-    True when scoped shadow-mode comparison should run alongside
-    live recall.
-
-    Backed by `Config.memory_recall_shadow_enabled`, which defaults
-    on but can be killed via `MEMORY_RECALL_SHADOW_ENABLED=0`. The
-    composition with `memory_enabled` happens in `load_config` so
-    that flag is already false when memory is off; here we just
-    return what config says.
-    """
-    return _config is not None and _config.memory_recall_shadow_enabled
-
-
-def is_scoped_recall_enabled() -> bool:
-    """
-    True when the live prompt context should be served by scoped
-    retrieval instead of legacy recall.
-
-    Backed by `Config.memory_scoped_recall_enabled`, which defaults
-    off and is enabled via `MEMORY_SCOPED_RECALL_ENABLED=1`. The
-    composition with `memory_enabled` happens in `load_config`, the
-    same contract as `is_recall_shadow_enabled` above.
-    """
-    return _config is not None and _config.memory_scoped_recall_enabled
-
-
 def _embed_via_configured_embedder(texts: list[str]) -> list[list[float]]:
     """
     Embed a batch of texts using the Mem0-wired embedder.
@@ -1678,55 +1634,42 @@ def _format_memory_result_line(r: MemoryResult) -> str:
     return f"- ({source_short}) {r.text}"
 
 
-@dataclass(frozen=True)
-class LegacyRecallResult:
-    """
-    Internal-only result type for `format_context_with_recall_payload`.
-
-    Bundles the rendered legacy memory block alongside the
-    `memory.recall` payload that the legacy path has computed but
-    not yet emitted. Shadow-mode logging (#546) reads both fields
-    so it can compare legacy vs scoped retrieval on the same turn
-    without re-running legacy search or parsing log text.
-
-    Attributes:
-        rendered_context: The legacy memory block ready to prepend
-            to the prompt, or `""` for any short-circuit path
-            (disabled / empty query / no results / etc.).
-        recall_payload: The fully populated `memory.recall` dict
-            (uniform schema described by `_base_recall_payload`).
-            The caller is responsible for emitting it exactly once
-            via `_emit_recall_log`.
-    """
-
-    rendered_context: str
-    recall_payload: dict[str, object]
-
-
-async def format_context_with_recall_payload(
+async def format_context(
     query: str,
     *,
     user_id: str,
     token_budget: int | None = None,
-) -> LegacyRecallResult:
+) -> str:
     """
-    Run the legacy recall pipeline; return rendered text + payload.
+    Run the unscoped recall pipeline; return the rendered memory
+    block, and emit exactly one `memory.recall` log line.
 
-    Same logic as `format_context()` minus the `memory.recall` log
-    emit. The caller decides when to emit so shadow-mode logging
-    can reuse one legacy search per eligible turn instead of
-    triggering two (one for the prompt, one for the comparison
-    log). This is a Kai-internal helper, not a public API.
+    Eval-only entry point: the live backend prompt path uses
+    `format_scoped_context_with_recall_payload` instead. This
+    function survives as the public API the eval harness and the
+    unscoped-recall-capture helper rely on (see
+    `kai.eval._unscoped_recall_capture` and
+    `kai.eval.memory_backend_gate`); its log-emission contract is
+    load-bearing for those callers and must not change without
+    coordinating a parallel eval-side migration.
 
-    Args:
-        query, user_id, token_budget: identical to format_context.
+    Returns a formatted string ready to prepend, or `""` if no
+    relevant memories are found or memory is disabled.
 
-    Returns:
-        LegacyRecallResult with the rendered block and the populated
-        `memory.recall` payload. Both are valid for every code
-        path (disabled, empty query, no results, all-below-floor,
-        budget-exhausted, success); short-circuits set the `reason`
-        field and return `rendered_context=""`.
+    Async because the underlying Mem0 search (embedding computation
+    plus Qdrant lookup) is CPU-bound (~50-100ms). Running it in an
+    executor keeps the asyncio event loop free for other users'
+    messages, typing indicators, and webhook handling.
+
+    The header explicitly marks these as context, not instructions,
+    to prevent the inner Claude from treating recalled memories as
+    directives.
+
+    Observability: emits exactly one `memory.recall` log line per
+    call (compact JSON payload), both on success and at every
+    short-circuit return. See `_emit_recall_log` and
+    `_base_recall_payload` for the schema. Designed to be parsed by
+    the retrieval eval harness without re-running search.
     """
     # Build the recall payload up-front with sentinel values for
     # every uniform-shape field. Each downstream branch updates the
@@ -1737,14 +1680,16 @@ async def format_context_with_recall_payload(
 
     if not is_enabled() or _config is None:
         payload["reason"] = _RECALL_REASON_DISABLED
-        return LegacyRecallResult(rendered_context="", recall_payload=payload)
+        _emit_recall_log(payload)
+        return ""
 
     # Empty queries (e.g. image-only prompts with no text) produce a
     # non-zero embedding in sentence-transformers, returning arbitrary
     # results that pass the relevance threshold. Skip entirely.
     if not query.strip():
         payload["reason"] = _RECALL_REASON_EMPTY_QUERY
-        return LegacyRecallResult(rendered_context="", recall_payload=payload)
+        _emit_recall_log(payload)
+        return ""
 
     budget = token_budget if token_budget is not None else _config.memory_token_budget
     payload["budget_tokens"] = budget
@@ -1753,7 +1698,7 @@ async def format_context_with_recall_payload(
     # there's room to filter by threshold and trim to budget. Use the
     # larger of the config limit and the overfetch constant so the user's
     # MEMORY_SEARCH_LIMIT setting is never silently ignored.
-    # search() is synchronous (Mem0 is sync) - offload to the default
+    # search() is synchronous (Mem0 is sync); offload to the default
     # ThreadPoolExecutor to avoid blocking the event loop.
     fetch_limit = max(_config.memory_search_limit, _SEARCH_OVERFETCH)
     payload["fetch_limit"] = fetch_limit
@@ -1780,7 +1725,8 @@ async def format_context_with_recall_payload(
     payload["hits_raw"] = len(results)
     if not results:
         payload["reason"] = _RECALL_REASON_NO_RESULTS
-        return LegacyRecallResult(rendered_context="", recall_payload=payload)
+        _emit_recall_log(payload)
+        return ""
 
     # Quality gate: drop low-relevance noise before any ranking adjustment.
     # Weighting happens AFTER this filter so a downweighted legacy row
@@ -1790,7 +1736,8 @@ async def format_context_with_recall_payload(
     payload["hits_after_floor"] = len(results)
     if not results:
         payload["reason"] = _RECALL_REASON_ALL_BELOW_FLOOR
-        return LegacyRecallResult(rendered_context="", recall_payload=payload)
+        _emit_recall_log(payload)
+        return ""
 
     # Speaker-weighted adjusted score for ranking only. Resolve
     # (speaker, confidence) ONCE per row via _read_time_speaker and
@@ -1869,50 +1816,13 @@ async def format_context_with_recall_payload(
     # "survived but dropped by budget" slice.
     if len(lines) <= 1:
         payload["reason"] = _RECALL_REASON_BUDGET_EXHAUSTED
-        return LegacyRecallResult(rendered_context="", recall_payload=payload)
+        _emit_recall_log(payload)
+        return ""
 
     payload["lines_used"] = lines_used
     payload["returned_empty"] = False
-    return LegacyRecallResult(rendered_context="\n".join(lines), recall_payload=payload)
-
-
-async def format_context(
-    query: str,
-    *,
-    user_id: str,
-    token_budget: int | None = None,
-) -> str:
-    """
-    Search for relevant memories and format them for context injection.
-
-    Returns a formatted string ready to prepend to the user's message,
-    or an empty string if no relevant memories are found or memory is
-    disabled.
-
-    Async because the underlying Mem0 search (embedding computation +
-    Qdrant lookup) is CPU-bound (~50-100ms). Running it in an executor
-    keeps the asyncio event loop free for other users' messages, typing
-    indicators, and webhook handling.
-
-    The header explicitly marks these as context, not instructions,
-    to prevent the inner Claude from treating recalled memories as
-    directives.
-
-    Observability: every call emits exactly one structured log line
-    with the prefix `memory.recall` and a compact JSON payload, both
-    on success and at every short-circuit return. See _emit_recall_log
-    and _base_recall_payload for the schema. Designed to be parsed by
-    a downstream retrieval eval harness without re-running search.
-
-    Implementation: thin wrapper around
-    `format_context_with_recall_payload`. The split lets shadow-mode
-    logging (#546) reuse the legacy payload without re-running
-    legacy search; this wrapper preserves the public signature and
-    log-emission contract every existing caller depends on.
-    """
-    result = await format_context_with_recall_payload(query, user_id=user_id, token_budget=token_budget)
-    _emit_recall_log(result.recall_payload)
-    return result.rendered_context
+    _emit_recall_log(payload)
+    return "\n".join(lines)
 
 
 async def retrieve_scoped_memories(
@@ -1926,10 +1836,10 @@ async def retrieve_scoped_memories(
 
     Returns structured candidates plus debug metadata; does NOT
     render prompt text and does NOT emit `memory.recall` (or any
-    other) log line. Live prompt injection still goes through
-    `format_context`; this helper is the shared read-path contract
-    that later prompt rendering, shadow-mode logging, and the
-    eventual read-path switch will consume.
+    other) log line. The shared read-path contract is consumed by
+    `format_scoped_context_with_recall_payload` (live prompt
+    injection) and by the eval harness; the renderer is what emits
+    the `memory.recall` line.
 
     Pipeline (filter-before-rank):
 
@@ -1955,13 +1865,12 @@ async def retrieve_scoped_memories(
 
     Args:
         context: Per-turn input. Only `chat_id`, `message`, and
-            `workspace` drive behavior in this issue. The other
-            fields ride through to debug metadata for shadow-mode
-            and future policy use.
-        token_budget: Forward-looking parameter so shadow-mode and
-            later renderers can request the same budget as live
-            `format_context`. Not consumed in this issue because
-            the helper does not render prompt lines.
+            `workspace` drive behavior here; the other fields ride
+            through to debug metadata for the `memory.recall`
+            payload and future policy use.
+        token_budget: Forwarded so the renderer can request the
+            same budget the live prompt path uses. Not consumed
+            by the helper itself; it does not render prompt lines.
         limit: Caller-supplied limit, clamped up to
             `_SEARCH_OVERFETCH` so scoped admission still has room
             to discard wrong-scope rows.
@@ -1973,9 +1882,9 @@ async def retrieve_scoped_memories(
         per-reason exclusion counts, and the caller's per-turn
         context fields.
     """
-    # Forward-looking: accepted so callers can pass it through
-    # unchanged once #545/#546 wire prompt rendering and shadow-mode
-    # logging. Reading it once silences static analysis about an
+    # Accepted so the renderer can pass it through unchanged; not
+    # consumed here because the helper does not render prompt
+    # lines. Reading it once silences static analysis about an
     # unused-but-required parameter.
     _ = token_budget
 
@@ -2084,8 +1993,8 @@ async def retrieve_scoped_memories(
     ]
 
     # Step 6: scope admission. Exclusion reasons are tallied per
-    # stable key so shadow-mode logs can compare excluded counts
-    # across the same query under legacy and scoped retrieval.
+    # stable key so the `memory.recall` payload's `scoped_debug`
+    # block can carry per-reason excluded counts for log analysis.
     admitted: list[tuple[MemoryResult, ResolvedMemoryScope]] = []
     excluded: dict[str, int] = {}
     for r, resolved in resolved_rows:
@@ -2123,8 +2032,8 @@ async def retrieve_scoped_memories(
     # via _read_time_speaker (same pattern format_context uses to
     # avoid double-parsing metadata) and compute the demote-only
     # multiplier from those two factors directly. Carrying every
-    # signal on ScopedMemoryHit means downstream renderers and
-    # shadow-mode loggers do not have to redo this work.
+    # signal on ScopedMemoryHit means the renderer and the
+    # `memory.recall` payload composer do not have to redo this work.
     hits: list[ScopedMemoryHit] = []
     for r, resolved in after_floor:
         speaker, confidence = _read_time_speaker(r.metadata)
@@ -2196,10 +2105,9 @@ def format_scoped_context(
     Render a ScopedRetrievalResult into a two-section prompt block.
 
     Pure formatting layer. Does NOT search memory, detect projects,
-    emit log lines, or call `retrieve_scoped_memories`. Live prompt
-    injection still goes through `format_context`; this renderer is
-    consumed by later issues (#546 shadow-mode logging, then the
-    read-path switch).
+    emit log lines, or call `retrieve_scoped_memories`. Consumed by
+    `format_scoped_context_with_recall_payload` for live prompt
+    injection.
 
     Section shape (D3 / D4):
 
@@ -2362,44 +2270,24 @@ def _render_scoped_sections(
     return text, rendered_hits
 
 
-# ── Shadow-mode comparison logging (#546) ────────────────────────────
+# ── Scoped recall payload helpers ────────────────────────────────────
 
 
-# Maximum chars of an exception message echoed into the shadow log
-# on a scoped failure. Long messages (e.g. a Mem0 connection error
-# with a serialized request body) would otherwise blow up the
-# shadow line. Match the per-hit snippet truncation so log volume
-# scales consistently with the other text fields.
-_SHADOW_ERROR_MESSAGE_TRUNC = 200
-
-
-def _ordered_difference(left: list[str], right: list[str]) -> list[str]:
-    """
-    Return items in `left` not present in `right`, preserving left
-    order. Stable for the shadow `removed_ids` / `added_ids`
-    fields where rank-order in the source list is the analyst
-    signal (oldest scoped removal first vs newest, etc.).
-    """
-    right_set = set(right)
-    return [item for item in left if item not in right_set]
-
-
-def _ordered_intersection(left: list[str], right: list[str]) -> list[str]:
-    """
-    Return items present in both lists, preserving left order. Used
-    for `same_ids` so the shadow line shows legacy rank order on
-    the surviving rows rather than scoped order.
-    """
-    right_set = set(right)
-    return [item for item in left if item in right_set]
+# Maximum chars of an exception message echoed into the scoped failure
+# branch of memory.recall (see `format_scoped_context_with_recall_payload`).
+# Long messages (a Mem0 connection error with a serialized request body,
+# for example) would otherwise blow up the recall line. Match the per-hit
+# snippet truncation so log volume scales consistently with the other
+# text fields.
+_SCOPED_ERROR_MESSAGE_TRUNC = 200
 
 
 def _scoped_debug_to_payload(debug: ScopedRetrievalDebug) -> dict[str, object]:
     """
     Convert a `ScopedRetrievalDebug` to a JSON-safe dict for the
-    `scoped_debug` field of `memory.recall_shadow`. All values are
-    already JSON-safe primitives or containers thereof; `allowed_scopes`
-    is a tuple and is converted to a list for json.dumps friendliness.
+    `scoped_debug` field of `memory.recall`. All values are already
+    JSON-safe primitives or containers thereof; `allowed_scopes` is a
+    tuple and is converted to a list for json.dumps friendliness.
     Tuples serialize to JSON arrays under json.dumps already, but a
     list is the standard wire shape for parsers that round-trip back
     through Python via json.loads.
@@ -2424,15 +2312,15 @@ def _scoped_debug_to_payload(debug: ScopedRetrievalDebug) -> dict[str, object]:
     }
 
 
-def _scoped_hit_to_shadow_payload(hit: ScopedMemoryHit) -> dict[str, object]:
+def _scoped_hit_to_payload(hit: ScopedMemoryHit) -> dict[str, object]:
     """
-    Convert a `ScopedMemoryHit` to a JSON-safe dict for the
-    `scoped_hits` array. Mirrors the per-hit shape from `memory.recall`
-    (id/source/speaker/confidence/score/adj/snippet) plus the scope
+    Convert a `ScopedMemoryHit` to a JSON-safe dict for the `hits`
+    array on the `memory.recall` payload. Carries
+    id/source/speaker/confidence/score/adj/snippet plus the scope
     discriminators (scope/project_id) so log analysts can tell at a
     glance whether each surviving hit is global or matching-project.
-    Snippet uses `_RECALL_SNIPPET_TRUNC` so the two log lines have
-    matching per-hit text shape.
+    Snippet uses `_RECALL_SNIPPET_TRUNC` so per-hit text shape stays
+    consistent with the rest of the payload.
     """
     r = hit.result
     return {
@@ -2448,202 +2336,16 @@ def _scoped_hit_to_shadow_payload(hit: ScopedMemoryHit) -> dict[str, object]:
     }
 
 
-def _shadow_base_payload(
-    *,
-    user_id: str,
-    query: str,
-    workspace: Path | None,
-    backend_name: str | None,
-    job_type: str | None,
-    session_id: str | None,
-    legacy_payload: dict[str, object],
-) -> dict[str, object]:
-    """
-    Build the uniform-shape base of a `memory.recall_shadow` payload.
-
-    Populates every top-level key from D7 with sentinel values for
-    fields the caller has not computed yet. Every emit path
-    (success, missing-workspace, shadow-error) starts from this
-    base and overrides only the fields it knows about, so the
-    log schema is uniform and downstream parsers do not need to
-    branch on `if "scoped_ids" in record`.
-
-    `legacy_*` fields are populated from the legacy recall payload
-    that `format_context_with_recall_payload` already computed,
-    avoiding a second legacy search.
-    """
-    # legacy_hits is the same per-hit array the legacy memory.recall
-    # line carries; reuse it directly so log analysts see identical
-    # per-hit shape on both sides of the comparison.
-    legacy_hits = legacy_payload.get("hits") or []
-    legacy_ids = [h.get("id") for h in legacy_hits if isinstance(h, dict)] if isinstance(legacy_hits, list) else []
-
-    return {
-        "user_id": user_id,
-        "query_len": len(query),
-        "query": _truncate(query, _RECALL_QUERY_TRUNC),
-        "backend_name": backend_name,
-        "job_type": job_type,
-        "session_id": session_id,
-        "workspace": str(workspace) if workspace is not None else "",
-        "legacy_reason": legacy_payload.get("reason", "ok"),
-        "legacy_returned_empty": legacy_payload.get("returned_empty", True),
-        "legacy_lines_used": legacy_payload.get("lines_used", 0),
-        "legacy_budget_tokens": legacy_payload.get("budget_tokens", 0),
-        "legacy_fetch_limit": legacy_payload.get("fetch_limit", 0),
-        "legacy_floor": legacy_payload.get("floor", 0.0),
-        "legacy_ids": legacy_ids,
-        "legacy_hits": legacy_hits,
-        "scoped_reason": "",
-        "scoped_rendered_empty": True,
-        "scoped_rendered_chars": 0,
-        "scoped_debug": None,
-        "scoped_ids": [],
-        "scoped_hits": [],
-        "removed_ids": [],
-        "added_ids": [],
-        "same_ids": [],
-        "shadow_error": False,
-        "shadow_error_type": "",
-        "shadow_error_message": "",
-    }
-
-
-async def run_scoped_recall_shadow(
-    *,
-    query: str,
-    user_id: str,
-    legacy_result: LegacyRecallResult,
-    workspace: Path | None,
-    backend_name: str | None = None,
-    job_type: str | None = None,
-    session_id: str | None = None,
-    token_budget: int | None = None,
-) -> None:
-    """
-    Run scoped retrieval and scoped rendering as a shadow of the
-    legacy recall already produced, then emit one
-    `memory.recall_shadow` log line.
-
-    Best-effort: any exception from scoped retrieval or rendering is
-    caught and logged as a shadow line with `shadow_error=true`.
-    The function never raises out, so the live prompt path that
-    called the helper is not affected by scoped bugs.
-
-    Behavioral branches (each emits exactly one shadow line):
-
-    - `workspace is None`: skip scoped retrieval entirely. Emit a
-      shadow line with `scoped_reason="missing_workspace"` and
-      empty scoped fields. Lets unattended callers and tests opt
-      out cleanly without failing the live path.
-    - Scoped retrieval + rendering succeed: emit the full
-      success-shape payload with legacy/scoped IDs, removed/added/
-      same diffs, scoped debug, and rendered-output preview metadata
-      (chars, empty flag).
-    - Scoped retrieval or rendering raises: emit a shadow line with
-      `shadow_error=true`, the exception class name, a truncated
-      message, and the failure-path sentinels from D7.
-
-    The legacy `_emit_recall_log` is NOT called from here; the
-    caller is responsible for emitting `memory.recall` exactly once
-    before invoking shadow, matching the D3/D4 contract.
-
-    Disabled via `Config.memory_recall_shadow_enabled = False`
-    (env: `MEMORY_RECALL_SHADOW_ENABLED=0/false/no`). When
-    disabled, the function returns immediately and emits no log,
-    so callers can invoke it unconditionally on every eligible
-    turn without their own flag check.
-    """
-    if not is_recall_shadow_enabled():
-        return
-
-    base = _shadow_base_payload(
-        user_id=user_id,
-        query=query,
-        workspace=workspace,
-        backend_name=backend_name,
-        job_type=job_type,
-        session_id=session_id,
-        legacy_payload=legacy_result.recall_payload,
-    )
-
-    # Missing-workspace branch: shadow logger sets a string the
-    # retrieval helper's reason enum does not contain. Per D7+D8
-    # this is shadow-logger-only; do not add it to
-    # retrieve_scoped_memories.
-    if workspace is None:
-        base["scoped_reason"] = "missing_workspace"
-        _emit_recall_shadow_log(base)
-        return
-
-    try:
-        # Build the per-turn context using the same chat_id-as-user_id
-        # shape that the legacy path used. ScopedRetrievalContext
-        # accepts int|str; pass the user_id string through to match
-        # what retrieve_scoped_memories will hand to Mem0.
-        context = ScopedRetrievalContext(
-            chat_id=user_id,
-            message=query,
-            workspace=workspace,
-            job_type=job_type,
-            backend_name=backend_name,
-            session_id=session_id,
-        )
-        legacy_budget = base["legacy_budget_tokens"] if isinstance(base["legacy_budget_tokens"], int) else None
-        scoped_result = await retrieve_scoped_memories(
-            context,
-            token_budget=token_budget if token_budget is not None else legacy_budget,
-        )
-        rendered = format_scoped_context(
-            scoped_result,
-            token_budget=token_budget if token_budget is not None else legacy_budget,
-        )
-    except Exception as exc:
-        # Failure isolation: per D6 every scoped failure produces a
-        # uniform shadow_error payload using the D7 sentinels. The
-        # legacy fields populated by _shadow_base_payload survive.
-        base["shadow_error"] = True
-        base["shadow_error_type"] = type(exc).__name__
-        base["shadow_error_message"] = _truncate(str(exc), _SHADOW_ERROR_MESSAGE_TRUNC)
-        base["scoped_reason"] = "shadow_error"
-        # scoped_* sentinels already match D7's failure-path values
-        # from _shadow_base_payload; nothing else to override.
-        _emit_recall_shadow_log(base)
-        return
-
-    # Success path: compute IDs, diffs, scoped debug, and rendered
-    # preview metadata. legacy_ids preserves legacy rank order;
-    # scoped_ids preserves scoped rank order; the diffs preserve
-    # their respective source orders per D7.
-    legacy_ids_obj = base["legacy_ids"]
-    legacy_ids: list[str] = (
-        [i for i in legacy_ids_obj if isinstance(i, str)] if isinstance(legacy_ids_obj, list) else []
-    )
-    scoped_ids: list[str] = [hit.result.id for hit in scoped_result.hits]
-
-    base["scoped_reason"] = scoped_result.debug.reason
-    base["scoped_debug"] = _scoped_debug_to_payload(scoped_result.debug)
-    base["scoped_ids"] = scoped_ids
-    base["scoped_hits"] = [_scoped_hit_to_shadow_payload(h) for h in scoped_result.hits]
-    base["removed_ids"] = _ordered_difference(legacy_ids, scoped_ids)
-    base["added_ids"] = _ordered_difference(scoped_ids, legacy_ids)
-    base["same_ids"] = _ordered_intersection(legacy_ids, scoped_ids)
-    base["scoped_rendered_empty"] = rendered == ""
-    base["scoped_rendered_chars"] = len(rendered)
-
-    _emit_recall_shadow_log(base)
-
-
 @dataclass(frozen=True)
 class ScopedRecallResult:
     """
     Internal-only result type for `format_scoped_context_with_recall_payload`.
 
-    The scoped twin of `LegacyRecallResult`: the rendered two-section
-    memory block plus the `memory.recall` payload the caller emits
-    exactly once via `_emit_recall_log`. Separate type (not a reuse of
-    the legacy one) so call sites and tests state which pipeline
-    produced the value.
+    Bundles the rendered two-section memory block with the `memory.recall`
+    payload the caller emits exactly once via `_emit_recall_log`. The
+    split mirrors `format_context`'s emit-at-return contract: the
+    renderer owns the payload up to the moment of emit, the caller owns
+    the emit.
 
     Attributes:
         rendered_context: The scoped memory block ready to prepend to
@@ -2679,19 +2381,16 @@ async def format_scoped_context_with_recall_payload(
     Run the scoped recall pipeline for LIVE prompt injection.
 
     Composes `retrieve_scoped_memories` (filter-before-rank) and
-    `format_scoped_context` (two-section rendering) into the same
-    rendered-text-plus-payload shape the legacy
-    `format_context_with_recall_payload` returns, so the caller in
-    `assemble_turn_context` can switch pipelines without changing its
-    emit-once `memory.recall` contract.
+    `format_scoped_context` (two-section rendering) into a single
+    rendered-text-plus-payload shape so `assemble_turn_context` can
+    own the emit-once `memory.recall` contract.
 
     FAIL CLOSED: every exception from scoped retrieval or rendering is
     caught here and collapses to `rendered_context=""` with
     `reason="scoped_error"` plus the error class and truncated message
-    in the payload. The epic's invariant is that a scoped read-path
-    bug must degrade to "less memory", never to unscoped fallback
-    content; returning empty (instead of raising or delegating to
-    legacy recall) is the enforcement point. The caller still emits
+    in the payload. A scoped read-path bug must degrade to "less
+    memory", never to unscoped fallback content; returning empty
+    (instead of raising) is the enforcement point. The caller still emits
     the payload, so the failing turn stays visible in the log stream.
 
     A None `workspace` flows through to global-only retrieval (see
@@ -2724,7 +2423,7 @@ async def format_scoped_context_with_recall_payload(
     except Exception as exc:
         payload["reason"] = _RECALL_REASON_SCOPED_ERROR
         payload["scoped_error_type"] = type(exc).__name__
-        payload["scoped_error_message"] = _truncate(str(exc), _SHADOW_ERROR_MESSAGE_TRUNC)
+        payload["scoped_error_message"] = _truncate(str(exc), _SCOPED_ERROR_MESSAGE_TRUNC)
         payload["returned_empty"] = True
         return ScopedRecallResult(rendered_context="", recall_payload=payload)
 
@@ -2754,7 +2453,7 @@ async def format_scoped_context_with_recall_payload(
     # math depends on.
     rendered_ids = {h.result.id for h in rendered_hits}
     overflow_hits = [h for h in scoped_result.hits if h.result.id not in rendered_ids]
-    payload["hits"] = [_scoped_hit_to_shadow_payload(h) for h in rendered_hits + overflow_hits]
+    payload["hits"] = [_scoped_hit_to_payload(h) for h in rendered_hits + overflow_hits]
     payload["lines_used"] = len(rendered_hits)
     return ScopedRecallResult(rendered_context=rendered, recall_payload=payload)
 

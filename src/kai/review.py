@@ -83,22 +83,40 @@ _MAX_PRIOR_COMMENTS_CHARS = 50_000
 # ── Bundle budget constants ──────────────────────────────────────────
 #
 # Per-section caps used by the deterministic budgeter that backs
-# build_pr_review_context() / build_review_prompt_from_context(). The
-# numbers target the realistic kai PR shape: a source module plus
-# its corresponding test file in the same change. Concretely, today's
-# `bot.py` is ~180K chars and `tests/test_bot.py` is ~246K chars; a
-# single-file rebalance is not enough because the budgeter measures
-# the COMBINED rendered size of the changed-files section, not each
-# file in isolation. The first production webhook review against the
-# previous cap set (250K changed-files / 360K global) saw ~426K
-# combined and dropped `test_bot.py` to a note even though both
-# files were inside the per-file cap. The current values admit the
-# two-large-file case so the bundle's full-file context survives
-# end-to-end. The cross-section drop ladder still enforces the
-# global ceiling when an unusually large PR overshoots.
-_MAX_REVIEW_CONTEXT_CHARS = 600_000
-_MAX_PATCH_CHARS = 80_000
-_MAX_CHANGED_FILES_CHARS = 450_000
+# build_pr_review_context() / build_review_prompt_from_context().
+#
+# The global ceiling sizes the bundle to admit a many-large-file PR's
+# full changed-file contents and full combined patch end-to-end. The
+# changed-files section runs a dynamic allocator
+# (`_compute_dynamic_changed_files_cap`) rather than a static cap:
+# the allocator measures the rendered weight of every other section,
+# subtracts that and `_OVERHEAD_RESERVE` from the global ceiling, and
+# floors at `_CHANGED_FILES_SECTION_FLOOR` so a pathological
+# non-changed payload never starves changed-files below the legacy
+# static-cap behavior. The cross-section drop ladder is defense in
+# depth for the two paths the allocator cannot prevent: floor-branch
+# saturation (non-changed weight exceeds the global ceiling minus
+# floor minus reserve) and estimator drift (rendered overhead
+# materially exceeds `_OVERHEAD_RESERVE`).
+#
+# The per-section caps for related-context, linked-issues, commits,
+# and prior-comments stay at their existing values: each one is
+# numerically dwarfed by the new global ceiling, and raising them
+# would consume headroom the dynamic allocator routes to
+# changed-files.
+_MAX_REVIEW_CONTEXT_CHARS = 3_500_000
+_MAX_PATCH_CHARS = 200_000
+# Minimum cap the dynamic changed-files allocator can produce. Matches
+# the legacy static cap so the safety net never regresses below
+# previously-shipped behavior, even when pathological non-changed
+# sections would otherwise drive the dynamic cap lower.
+_CHANGED_FILES_SECTION_FLOOR = 450_000
+# Headroom held back from the dynamic changed-files cap for rendered
+# overhead (per-section boundary tokens, BEGIN/END markers, status
+# lines) that `_estimate_total_chars` does not measure. Keeping the
+# reserve outside the section-cap arithmetic means the cross-section
+# ladder almost never has to fire on the typical headroom path.
+_OVERHEAD_RESERVE = 50_000
 _MAX_RELATED_CONTEXT_CHARS = 35_000
 _MAX_LINKED_ISSUES_CHARS = 30_000
 _MAX_COMMITS_CHARS = 20_000
@@ -1185,10 +1203,11 @@ async def fetch_linked_issues(
 # its drop ladder. Files over this cap are recorded with a `note`
 # instead of inline content. Sized to fit realistic kai-shaped
 # modules (the largest production files sit around 250K chars; the
-# largest test files reach ~250K) so the bundle's full-file context
-# is available on PRs that touch them. The per-section cap
-# (`_MAX_CHANGED_FILES_CHARS`) bounds how much of this any single PR
-# can claim.
+# largest test files reach ~412K) so the bundle's full-file context
+# is available on PRs that touch them. How much of this any one PR
+# can collectively claim is bounded by the dynamic changed-files
+# cap (`_compute_dynamic_changed_files_cap`), floored at
+# `_CHANGED_FILES_SECTION_FLOOR`.
 _MAX_CHANGED_FILE_BYTES = 500_000
 
 # File suffixes the changed-files fetcher refuses to fetch even when
@@ -2078,14 +2097,22 @@ def _cap_patch(patch: str) -> tuple[str, list[BudgetNote]]:
 
 def _cap_changed_files(
     files: tuple[ChangedFile, ...],
+    *,
+    cap: int,
 ) -> tuple[tuple[ChangedFile, ...], list[BudgetNote]]:
-    """Truncate full file contents last; never drop the file entirely."""
+    """Truncate full file contents last; never drop the file entirely.
+
+    `cap` is the dynamic changed-files section cap computed by
+    `_compute_dynamic_changed_files_cap`. It is keyword-only so the
+    caller cannot accidentally pass the wrong constant; the caller is
+    responsible for floor enforcement before invoking this function.
+    """
     notes: list[BudgetNote] = []
     if not files:
         return ((), notes)
 
     total = sum(_measure_changed_file(f) for f in files)
-    if total <= _MAX_CHANGED_FILES_CHARS:
+    if total <= cap:
         return (files, notes)
 
     # Drop ladder rung 6: truncate the largest file contents first
@@ -2096,7 +2123,7 @@ def _cap_changed_files(
     indexed.sort(key=lambda item: _measure_changed_file(item[1]), reverse=True)
     truncated_paths: list[str] = []
     for idx, f in indexed:
-        if sum(_measure_changed_file(g) for g in [files[i] for i in range(len(files))]) <= _MAX_CHANGED_FILES_CHARS:
+        if sum(_measure_changed_file(g) for g in [files[i] for i in range(len(files))]) <= cap:
             break
         if f.content is None:
             continue
@@ -2145,6 +2172,38 @@ def _estimate_total_chars(ctx: PRReviewContext) -> int:
     return total
 
 
+def _compute_dynamic_changed_files_cap(ctx: PRReviewContext) -> int:
+    """Compute the section cap for changed_files given the rest of the bundle.
+
+    Constructs a measurement context with `changed_files=()` and reuses
+    `_estimate_total_chars` so any future change to per-section
+    measurement flows through here automatically. Floors at
+    `_CHANGED_FILES_SECTION_FLOOR` so pathological non-changed sections
+    never starve changed-files below the legacy static-cap behavior.
+    Holds `_OVERHEAD_RESERVE` back for rendered overhead the estimator
+    does not capture (per-section boundary tokens, BEGIN/END markers,
+    status lines).
+    """
+    measurement_ctx = PRReviewContext(
+        repo=ctx.repo,
+        pr_number=ctx.pr_number,
+        metadata=ctx.metadata,
+        linked_issues=ctx.linked_issues,
+        commits=ctx.commits,
+        patch=ctx.patch,
+        changed_files=(),
+        related_context=ctx.related_context,
+        spec=ctx.spec,
+        conventions=ctx.conventions,
+        prior_comments=ctx.prior_comments,
+        budget_notes=ctx.budget_notes,
+        collection_warnings=ctx.collection_warnings,
+    )
+    non_changed = _estimate_total_chars(measurement_ctx)
+    headroom = _MAX_REVIEW_CONTEXT_CHARS - non_changed - _OVERHEAD_RESERVE
+    return max(_CHANGED_FILES_SECTION_FLOOR, headroom)
+
+
 def budget_review_context(ctx: PRReviewContext) -> PRReviewContext:
     """
     Apply per-section caps and the drop ladder to a freshly-collected bundle.
@@ -2168,8 +2227,10 @@ def budget_review_context(ctx: PRReviewContext) -> PRReviewContext:
     """
     notes: list[BudgetNote] = list(ctx.budget_notes)
 
-    # Per-section caps. Run in fixed order so the result is
-    # deterministic for the same input.
+    # Per-section caps for the non-changed-files sections. Run in fixed
+    # order so the result is deterministic for the same input. The
+    # changed-files section runs after these so the dynamic allocator
+    # can size it against the measured weight of everything else.
     related, n = _cap_related(ctx.related_context)
     notes.extend(n)
     commits, n = _cap_commits(ctx.commits)
@@ -2178,11 +2239,11 @@ def budget_review_context(ctx: PRReviewContext) -> PRReviewContext:
     notes.extend(n)
     patch, n = _cap_patch(ctx.patch)
     notes.extend(n)
-    changed_files, n = _cap_changed_files(ctx.changed_files)
-    notes.extend(n)
 
     # Apply prior-comments cap (mirrors the existing
     # _MAX_PRIOR_COMMENTS_CHARS behavior for the legacy diff path).
+    # Capped before the dynamic allocator runs so its measurement
+    # reflects the post-cap size, not the pre-cap raw length.
     prior_comments = ctx.prior_comments
     if prior_comments and len(prior_comments) > _MAX_PRIOR_COMMENTS_CHARS:
         prior_comments = _truncate_with_marker(
@@ -2196,6 +2257,31 @@ def budget_review_context(ctx: PRReviewContext) -> PRReviewContext:
                 message="Prior review thread truncated to stay within cap.",
             )
         )
+
+    # Build a partial context with every non-changed-files section
+    # already capped; the allocator zeros out changed_files internally
+    # before measuring so the field value we pass here does not
+    # affect the result. Reuses `_estimate_total_chars` via the
+    # helper so any future change to per-section measurement flows
+    # through here automatically.
+    partial_ctx = PRReviewContext(
+        repo=ctx.repo,
+        pr_number=ctx.pr_number,
+        metadata=ctx.metadata,
+        linked_issues=linked_issues,
+        commits=commits,
+        patch=patch,
+        changed_files=ctx.changed_files,
+        related_context=related,
+        spec=ctx.spec,
+        conventions=ctx.conventions,
+        prior_comments=prior_comments,
+        budget_notes=tuple(notes),
+        collection_warnings=ctx.collection_warnings,
+    )
+    dynamic_cap = _compute_dynamic_changed_files_cap(partial_ctx)
+    changed_files, n = _cap_changed_files(ctx.changed_files, cap=dynamic_cap)
+    notes.extend(n)
 
     capped = PRReviewContext(
         repo=ctx.repo,
@@ -2213,13 +2299,19 @@ def budget_review_context(ctx: PRReviewContext) -> PRReviewContext:
         collection_warnings=ctx.collection_warnings,
     )
 
-    # Cross-section drop ladder: if the per-section caps still leave
-    # the total above the global ceiling, walk the documented order
-    # (broad related hits, then test excerpts, then issue comments,
-    # then commit bodies, then patch, then changed files) until we
-    # fit. This branch is rarely taken in practice because the
-    # per-section caps sum within ~50K of the global cap; it exists
-    # so an outlier PR cannot blow the backend's context window.
+    # Cross-section drop ladder: if the bundle is still above the
+    # global ceiling after per-section caps and the dynamic
+    # changed-files cap, walk the documented order (broad related
+    # hits, then commit bodies, then issue comments, then prior
+    # thread, then spec / conventions, then patch, then changed
+    # files) until we fit. This branch is defense in depth under the
+    # lifted ceiling: the dynamic allocator's `_OVERHEAD_RESERVE`
+    # keeps the typical headroom-path bundle under the ceiling
+    # without it. The ladder still fires when non-changed weight
+    # drives the allocator down to `_CHANGED_FILES_SECTION_FLOOR`
+    # and the resulting bundle still overshoots, or when
+    # `_estimate_total_chars` materially under-counts rendered
+    # overhead.
     if _estimate_total_chars(capped) <= _MAX_REVIEW_CONTEXT_CHARS:
         return capped
     return _apply_cross_section_ladder(capped)

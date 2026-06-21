@@ -57,11 +57,49 @@ def _make_config(*, enabled: bool = True, **overrides) -> Config:
 
 
 def _reset_memory_module():
-    """Reset the memory module's singleton state between tests."""
+    """Reset the memory module's singleton state between tests.
+
+    Note: this does NOT call `Memory.close()` on the singleton.
+    `TestMemoryIntegration` shares a module-scoped `real_memory_instance`
+    across multiple tests by assigning it to `mem_mod._memory`;
+    closing here would invalidate the shared instance after the first
+    test and break the rest of the class. `TestInitMemory` tests that
+    create their own Memory instance via `init_memory()` close it
+    via `_close_init_memory` below.
+    """
     import kai.memory as mem_mod
 
     mem_mod._memory = None
     mem_mod._config = None
+
+
+def _close_init_memory() -> None:
+    """Close the singleton Memory created by a `TestInitMemory` test.
+
+    Mem0's own `close()` only closes the history SQLite db. The
+    Qdrant `vector_store` and `_telemetry_vector_store` hold separate
+    `QdrantClient` instances that own SQLite connections and embedded
+    storage locks; both need explicit `client.close()`. Each step is
+    wrapped in try/except because we may be tearing down a half-init
+    object and individual cleanup failures must not stop later steps.
+    """
+    import kai.memory as mem_mod
+
+    memory = mem_mod._memory
+    if memory is None:
+        return
+    try:
+        memory.close()
+    except Exception:
+        pass
+    for attr in ("vector_store", "_telemetry_vector_store"):
+        store = getattr(memory, attr, None)
+        client = getattr(store, "client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 # ── Fixtures ────────────────────────────────────────────────────────
@@ -130,8 +168,36 @@ def real_memory_instance(tmp_path_factory):
 # ── Unit tests (mocked Mem0, fast) ─────────────────────────────────
 
 
+# Third-party warnings scoped to this class: qdrant-client's local
+# mode opens a transient `:memory:` sqlite inside a `with` block
+# during collection creation; mem0's init then deepcopies the
+# surrounding state and duplicates the sqlite handle, which goes out
+# of scope unclosed. mem0's huggingface embedder calls
+# sentence-transformers' deprecated `get_sentence_embedding_dimension`.
+# Both come from third-party code; the suppression is scoped to this
+# class so a future leak from in-tree sqlite or in-tree FutureWarning
+# still surfaces in the rest of the suite.
+@pytest.mark.filterwarnings(
+    "ignore:unclosed database in <sqlite3.Connection object:ResourceWarning",
+    "ignore:unclosed event loop:ResourceWarning",
+    "ignore:The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`:FutureWarning",
+)
 class TestInitMemory:
     """Tests for init_memory() startup behavior."""
+
+    @pytest.fixture(autouse=True)
+    def _close_init_memory_after_test(self):
+        """Close the singleton Memory created by each test in this class.
+
+        Without this, Mem0's history SQLite db and the Qdrant clients
+        (vector_store and _telemetry_vector_store) stay open until GC
+        catches them; the GC then races with test teardown to emit
+        ResourceWarning chatter (unclosed event loop, unclosed
+        transport). Closing explicitly drains those resources before
+        the autouse `_clean_memory_state` fixture drops the singleton.
+        """
+        yield
+        _close_init_memory()
 
     def test_init_disabled(self):
         """When memory_enabled=False, init is a no-op."""
@@ -399,7 +465,14 @@ class TestInitMemory:
             init_memory(config)
             assert is_enabled()
 
-        # Reset and test with a mocked dimension mismatch
+        # Reset and test with a mocked dimension mismatch. Close
+        # before resetting so Mem0's history db and the Qdrant
+        # clients release cleanly; if we only dropped the singleton
+        # via _reset_memory_module(), the live Memory instance from
+        # the first init would no longer be reachable when the
+        # autouse _close_init_memory_after_test fixture runs, and the
+        # cleanup would fall back to GC finalization.
+        _close_init_memory()
         _reset_memory_module()
 
         mock_memory = MagicMock()
@@ -3494,6 +3567,14 @@ class TestGetAllFacts:
 
 
 @integration
+# Scoped to this class for the same reasons documented on
+# `TestInitMemory`: third-party warnings from mem0's huggingface
+# embedder and qdrant-client's transient sqlite handle.
+@pytest.mark.filterwarnings(
+    "ignore:unclosed database in <sqlite3.Connection object:ResourceWarning",
+    "ignore:unclosed event loop:ResourceWarning",
+    "ignore:The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`:FutureWarning",
+)
 class TestMemoryIntegration:
     """End-to-end tests with a real Mem0 instance and Qdrant storage."""
 

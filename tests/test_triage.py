@@ -85,6 +85,40 @@ def _mock_subprocess(stdout: str = "", returncode: int = 0, stderr: str = ""):
     return mock_proc
 
 
+def _mock_aiohttp_session_post(status: int = 200) -> tuple[MagicMock, MagicMock]:
+    """Build a mocked aiohttp ClientSession for the
+    `async with session, session.post(...)` pattern.
+
+    Returns (session, response). The session is a MagicMock so its
+    `.post(...)` call returns an object that supports the async
+    context manager protocol directly; the response is a MagicMock
+    with `.status` defaulted to the supplied value. Pair with a
+    `patch("kai.triage.aiohttp.ClientSession")` context manager and
+    wire the patched class via `_attach_session_to_class()`.
+
+    The bare `AsyncMock()` predecessor of this helper made
+    `session.post` itself an AsyncMock, so the production
+    `async with session.post(...) as resp:` evaluated `__aenter__`
+    on an unawaited coroutine and silently failed inside the
+    surrounding `try / except Exception:`. The helper uses a
+    MagicMock session so `.post(...)` returns a normal object whose
+    `__aenter__` resolves to the configured response.
+    """
+    session = MagicMock()
+    response = MagicMock()
+    response.status = status
+    session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+    session.post.return_value.__aexit__ = AsyncMock(return_value=None)
+    return session, response
+
+
+def _attach_session_to_class(session: MagicMock, mock_cls: MagicMock) -> None:
+    """Wire a patched `aiohttp.ClientSession` mock class to yield
+    `session` from `async with aiohttp.ClientSession() as session:`."""
+    mock_cls.return_value.__aenter__ = AsyncMock(return_value=session)
+    mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+
 # ── extract_issue_metadata ──────────────────────────────────────────
 
 
@@ -827,13 +861,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # Verify gh issue edit --add-label was called for both labels
         add_label_calls = [cmd for cmd in commands_run if "issue" in cmd and "edit" in cmd and "--add-label" in cmd]
         applied_labels = {cmd[list(cmd).index("--add-label") + 1] for cmd in add_label_calls}
@@ -860,13 +892,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # "bug" should not appear in any --add-label call
         add_label_calls = [cmd for cmd in commands_run if "issue" in cmd and "edit" in cmd and "--add-label" in cmd]
         for call in add_label_calls:
@@ -891,13 +921,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret", projects_json=projects_json)
 
+        assert mock_session.post.called
         # Should have called gh project item-add
         item_add_calls = [cmd for cmd in commands_run if "project" in cmd and "item-add" in cmd]
         assert len(item_add_calls) > 0
@@ -918,13 +946,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # No project item-add calls
         item_add_calls = [cmd for cmd in commands_run if "project" in cmd and "item-add" in cmd]
         assert len(item_add_calls) == 0
@@ -945,13 +971,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # Should have called gh issue comment
         comment_calls = [cmd for cmd in commands_run if "issue" in cmd and "comment" in cmd]
         assert len(comment_calls) > 0
@@ -969,11 +993,8 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
         # Verify the send-message call
@@ -1003,13 +1024,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # Should have called gh label create
         create_calls = [cmd for cmd in commands_run if "label" in cmd and "create" in cmd]
         assert len(create_calls) > 0
@@ -1030,13 +1049,11 @@ class TestApplyTriage:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # No --add-label calls should have been made
         add_label_calls = [cmd for cmd in commands_run if "issue" in cmd and "edit" in cmd and "--add-label" in cmd]
         assert len(add_label_calls) == 0
@@ -1067,11 +1084,8 @@ async def _apply_triage_capture(meta: IssueMetadata, result: dict, **kwargs) -> 
         patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
         patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
     ):
-        mock_session = AsyncMock()
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session, _ = _mock_aiohttp_session_post(status=200)
+        _attach_session_to_class(mock_session, mock_session_cls)
         await apply_triage(meta, result, 8080, "secret", **kwargs)
         if mock_session.post.called:
             captured["telegram"] = mock_session.post.call_args[1]["json"]["text"]
@@ -1147,13 +1161,11 @@ class TestTriageActionability:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret")
 
+        assert mock_session.post.called
         # Comment renders the status.
         comment_calls = [cmd for cmd in commands_run if "issue" in cmd and "comment" in cmd]
         assert len(comment_calls) == 1
@@ -1539,13 +1551,11 @@ class TestTriageIssue:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await triage_issue(payload, 8080, "secret")
 
+        assert mock_session.post.called
         # Pipeline ran (multiple subprocess calls)
         assert call_count > 0
         # Telegram notification was sent
@@ -1565,11 +1575,8 @@ class TestTriageIssue:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             # Should not raise
             await triage_issue(payload, 8080, "secret")
 
@@ -1592,11 +1599,8 @@ class TestTriageIssue:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await triage_issue(payload, 8080, "secret")
 
         # Error notification was sent
@@ -1624,14 +1628,22 @@ class TestSendErrorNotification:
             labels=[],
         )
 
-        mock_session = AsyncMock()
-        mock_session.post = AsyncMock(side_effect=ConnectionError("refused"))
+        # session.post() is a sync call in production; the side effect
+        # must fire when the call itself runs, not when an awaited
+        # coroutine resumes. AsyncMock would queue the exception on
+        # the unawaited coroutine and never raise, letting the test
+        # pass for the wrong reason (and leaking a never-awaited
+        # coroutine warning). MagicMock raises synchronously.
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=ConnectionError("refused"))
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("kai.triage.aiohttp.ClientSession", return_value=mock_session):
             # Should not raise
             await _send_error_notification(metadata, "test error", 8080, "secret")
+
+        mock_session.post.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_does_not_raise_on_timeout(self):
@@ -1647,13 +1659,15 @@ class TestSendErrorNotification:
             labels=[],
         )
 
-        mock_session = AsyncMock()
-        mock_session.post = AsyncMock(side_effect=TimeoutError())
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=TimeoutError())
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("kai.triage.aiohttp.ClientSession", return_value=mock_session):
             await _send_error_notification(metadata, "test error", 8080, "secret")
+
+        mock_session.post.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_logs_warning_on_failure(self, caplog):
@@ -1668,8 +1682,8 @@ class TestSendErrorNotification:
             labels=[],
         )
 
-        mock_session = AsyncMock()
-        mock_session.post = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=RuntimeError("boom"))
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
@@ -1679,6 +1693,7 @@ class TestSendErrorNotification:
         ):
             await _send_error_notification(metadata, "test error", 8080, "secret")
 
+        mock_session.post.assert_called_once()
         assert "Failed to send triage error notification" in caplog.text
 
     @pytest.mark.asyncio
@@ -1694,17 +1709,12 @@ class TestSendErrorNotification:
             labels=[],
         )
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_session = AsyncMock()
-        mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_session.post.return_value.__aexit__ = AsyncMock(return_value=False)
-
         with patch("kai.triage.aiohttp.ClientSession") as mock_cs:
-            mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_cs)
             await _send_error_notification(metadata, "test error", 8080, "secret", notify_chat_id=-100999)
 
+        assert mock_session.post.called
         body = mock_session.post.call_args[1]["json"]
         assert body["chat_id"] == -100999
 
@@ -1721,17 +1731,12 @@ class TestSendErrorNotification:
             labels=[],
         )
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_session = AsyncMock()
-        mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_session.post.return_value.__aexit__ = AsyncMock(return_value=False)
-
         with patch("kai.triage.aiohttp.ClientSession") as mock_cs:
-            mock_cs.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_cs.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_cs)
             await _send_error_notification(metadata, "test error", 8080, "secret", notify_chat_id=None)
 
+        assert mock_session.post.called
         body = mock_session.post.call_args[1]["json"]
         assert "chat_id" not in body
 
@@ -1757,13 +1762,8 @@ class TestApplyTriageNotifyChatId:
             patch("kai.triage.asyncio.create_subprocess_exec", side_effect=mock_exec),
             patch("kai.triage.aiohttp.ClientSession") as mock_session_cls,
         ):
-            mock_session = AsyncMock()
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
-            mock_session.post.return_value.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session, _ = _mock_aiohttp_session_post(status=200)
+            _attach_session_to_class(mock_session, mock_session_cls)
             await apply_triage(meta, result, 8080, "secret", notify_chat_id=-100999)
 
         # The Telegram summary POST should include chat_id

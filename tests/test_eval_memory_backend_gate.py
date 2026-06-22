@@ -62,6 +62,33 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
 
+class TestEvalProviderResolution:
+    """The gate resolves its eval-time provider through the shared
+    `_resolve_eval_provider` helper (DEFAULT_PROVIDER with a one-release
+    fallback to the deprecated LLM_PROVIDER name), so it does not bypass
+    the rename window. `run_backend` calls exactly `g._resolve_eval_provider`."""
+
+    def test_memory_backend_gate_reads_DEFAULT_PROVIDER(self, monkeypatch):
+        import kai.config as config_module
+
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("DEFAULT_PROVIDER", "openai")
+        config_module._renamed_key_deprecation_warned.clear()
+        assert g._resolve_eval_provider("memory backend gate env") == "openai"
+
+    def test_memory_backend_gate_legacy_LLM_PROVIDER_resolved_with_warning(self, monkeypatch, caplog):
+        import logging
+
+        import kai.config as config_module
+
+        monkeypatch.delenv("DEFAULT_PROVIDER", raising=False)
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        config_module._renamed_key_deprecation_warned.clear()
+        with caplog.at_level(logging.WARNING, logger="kai.config"):
+            assert g._resolve_eval_provider("memory backend gate env") == "openai"
+        assert any("LLM_PROVIDER" in r.message and "DEFAULT_PROVIDER" in r.message for r in caplog.records)
+
+
 class TestLoadProbes:
     def test_accepts_all_categories(self, tmp_path):
         """A synthetic fixture exercising each allowed category must
@@ -270,6 +297,23 @@ class TestMakeBackendConfig:
         assert config.default_backend == "codex"
         assert get_model_for(ModelRole.MEMORY_EXTRACTION, "codex", "openai") == "gpt-5.4-mini"
         assert get_model_for(ModelRole.MEMORY_EPISODE, "codex", "openai") == "gpt-5.4-mini"
+
+    def test_stamps_eval_provider_for_extraction(self):
+        """The eval provider is stamped into `default_provider` so the
+        extraction path (which resolves provider from the config, not the
+        run summary) sees the same value the report does. Without this a
+        goose arm run from a claude/codex install would extract with an
+        empty provider."""
+        config = g.make_backend_config(_BASE_CONFIG, "goose", "openai")
+        assert config.default_backend == "goose"
+        assert config.default_provider == "openai"
+
+    def test_default_provider_empty_when_omitted(self):
+        """Single-provider arms (claude/codex) pass no provider; the
+        implicit provider is used regardless, so default_provider stays
+        empty."""
+        config = g.make_backend_config(_BASE_CONFIG, "claude")
+        assert config.default_provider == ""
 
 
 # ── Anchor matching ─────────────────────────────────────────────────

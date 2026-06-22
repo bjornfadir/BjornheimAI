@@ -1265,15 +1265,17 @@ class TestCmdConfig:
     def _simulate_existing_etc_users_yaml(monkeypatch, content):
         """Simulate the canonical users.yaml already existing with the given content.
 
-        Used by tests that want to exercise the wizard's "skip user
-        prompts; summarize existing config" branch without touching the
-        real `/etc/kai/`. Patches the path's existence check AND the
-        sudo-cat reader that the wizard goes through (`Path.exists` for
-        the existence gate; `_read_users_yaml_text` for the body the
-        wizard prints a summary of). The existence patch compares
-        against the live `kai.install.USERS_YAML` attribute rather than
-        a hardcoded path, so it stacks on top of the autouse
-        `_isolate_users_yaml` redirect from conftest.
+        Used by tests that want the wizard to take the existing-canonical
+        path (skip the user-creation prompts, leave the file untouched)
+        without touching the real `/etc/kai/`. Patches the path's
+        existence check AND the sudo-cat reader the wizard goes through
+        (`Path.exists` for the existence gate; `_read_users_yaml_text`
+        for the body the wizard's later per-user scans parse, e.g.
+        `_users_yaml_goose_providers` / `_users_yaml_agent_backends`).
+        The existence patch compares against the live
+        `kai.install.USERS_YAML` attribute rather than a hardcoded path,
+        so it stacks on top of the autouse `_isolate_users_yaml` redirect
+        from conftest.
         """
         _real_exists = Path.exists
 
@@ -1808,7 +1810,7 @@ class TestCmdConfig:
         conf_path.write_text(json.dumps(existing))
 
         # Pretend /etc/kai/users.yaml is already in place; the wizard
-        # then summarizes it and skips the user-creation prompts.
+        # then skips the user-creation prompts and leaves it untouched.
         existing_users_yaml = "users:\n  - telegram_id: 999\n    name: existing\n    role: admin\n"
         self._simulate_existing_etc_users_yaml(monkeypatch, existing_users_yaml)
 
@@ -1826,10 +1828,11 @@ class TestCmdConfig:
         # Should preserve existing values when user accepts defaults
         assert conf["install_dir"] == "/custom/path"
         assert conf["env"]["TELEGRAM_BOT_TOKEN"] == "existing-token"
-        # Summary path printed; the wizard never staged a new users.yaml
-        # so no top-level staging key was written.
+        # With a canonical users.yaml already present the wizard skips the
+        # user-creation prompts entirely and never stages a new file, so
+        # no admin prompt is shown and no top-level staging key is written.
         output = capsys.readouterr().out
-        assert "already configured" in output
+        assert "Admin Telegram ID" not in output
         assert "users_yaml_staging_path" not in conf
 
     def test_validates_required_fields(self):

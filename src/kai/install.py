@@ -71,11 +71,13 @@ from kai.config import (
 from kai.named_access import replace_named_read_access
 from kai.protected_config import ProtectedConfigError, validate_protected_file_metadata
 from kai.user_isolation import validate_protected_user_isolation
+from kai.workshop.bootstrap import bootstrap_human_principal_id
 from kai.workshop.diagnostics import (
     workshop_bootstrap_status,
     workshop_delivery_authority_status,
     workshop_message_parity_status,
 )
+from kai.workshop.domain import WorkshopId
 from kai.workshop.runtime_profiles import (
     WorkshopRuntimeProfileError,
     WorkshopRuntimeProfileRegistry,
@@ -4294,6 +4296,162 @@ def _canonical_principal_storage_names(data_path: Path) -> dict[str, str]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeStorageTarget:
+    """One protected runtime's install-time storage and ownership target."""
+
+    runtime_config_id: int
+    profile_id: str
+    storage_name: str
+    os_user: str | None
+    backend: str
+    home_workspace: Path | None
+
+
+def _runtime_profile_principal_names(
+    data_path: Path,
+) -> tuple[bool, WorkshopId | None, dict[str, str]]:
+    """Resolve protected runtime profiles to canonical direct-channel owners.
+
+    The boolean distinguishes a database that predates Workshop assignments
+    from an initialized database whose missing mappings must fail closed.
+    """
+    db_path = data_path / "kai.db"
+    if db_path.is_symlink():
+        raise RuntimeError(f"Refusing symlinked database during protected runtime storage preflight: {db_path}")
+    if not db_path.is_file():
+        return False, None, {}
+    try:
+        connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            }
+            required = {
+                "channel_agent_runtime_assignments",
+                "channels",
+                "channel_memberships",
+                "principals",
+                "workshops",
+            }
+            if not tables >= required:
+                return False, None, {}
+            workshop_rows = connection.execute("SELECT id FROM workshops ORDER BY id").fetchall()
+            if len(workshop_rows) != 1:
+                raise RuntimeError("Initialized Workshop storage must contain exactly one Workshop")
+            try:
+                workshop_id = WorkshopId(str(workshop_rows[0][0]))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Initialized Workshop storage contains an invalid Workshop ID") from exc
+            rows = connection.execute(
+                "SELECT ra.runtime_profile_id, cm.principal_id "
+                "FROM channel_agent_runtime_assignments ra "
+                "JOIN channels c ON c.id = ra.channel_id AND c.kind = 'direct' "
+                "JOIN channel_memberships cm ON cm.channel_id = c.id AND cm.role = 'owner' "
+                "JOIN principals p ON p.id = cm.principal_id AND p.kind = 'human' "
+                "ORDER BY ra.runtime_profile_id, cm.principal_id"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Could not resolve protected runtime storage ownership: {exc}") from exc
+
+    owners: dict[str, set[str]] = {}
+    for raw_profile_id, raw_principal_id in rows:
+        owners.setdefault(str(raw_profile_id), set()).add(str(raw_principal_id))
+    ambiguous = sorted(profile_id for profile_id, principal_ids in owners.items() if len(principal_ids) != 1)
+    if ambiguous:
+        raise RuntimeError("Protected runtime storage ownership is ambiguous for profile(s): " + ", ".join(ambiguous))
+    return True, workshop_id, {profile_id: next(iter(principal_ids)) for profile_id, principal_ids in owners.items()}
+
+
+def _runtime_storage_targets(
+    data_path: Path,
+    runtime_profiles: WorkshopRuntimeProfileRegistry,
+    users_yaml_path: Path,
+) -> tuple[_RuntimeStorageTarget, ...]:
+    """Build profile-authoritative provisioning targets before disk mutation."""
+    compatibility_order = [chat_id for chat_id, _os_user in _collect_user_memory_owners(users_yaml_path)]
+    compatibility_ids = set(compatibility_order)
+    assignments_initialized, workshop_id, principal_names = _runtime_profile_principal_names(data_path)
+    compatibility_principal_names = _canonical_principal_storage_names(data_path)
+    by_config_id = {profile.runtime_config_id: profile for profile in runtime_profiles.profiles}
+    policy_profile_ids = {str(profile.profile_id) for profile in runtime_profiles.profiles}
+    stale_assignments = sorted(set(principal_names) - policy_profile_ids)
+    if stale_assignments:
+        raise RuntimeError(
+            "Canonical runtime storage assignment references profile(s) absent from protected policy: "
+            + ", ".join(stale_assignments)
+        )
+
+    ordered_ids = [runtime_id for runtime_id in compatibility_order if runtime_id in by_config_id]
+    ordered_ids.extend(sorted(runtime_id for runtime_id in by_config_id if runtime_id not in compatibility_ids))
+    targets: list[_RuntimeStorageTarget] = []
+    for runtime_config_id in ordered_ids:
+        profile = by_config_id[runtime_config_id]
+        principal_name = principal_names.get(str(profile.profile_id))
+        compatibility_principal = compatibility_principal_names.get(str(runtime_config_id))
+        if (
+            principal_name is not None
+            and compatibility_principal is not None
+            and principal_name != compatibility_principal
+        ):
+            raise RuntimeError(
+                f"Protected runtime profile {profile.profile_id} conflicts with its canonical compatibility owner"
+            )
+        if principal_name is None:
+            if runtime_config_id not in compatibility_ids:
+                raise RuntimeError(
+                    f"Protected runtime profile {profile.profile_id} must map to exactly one canonical human owner"
+                )
+            if compatibility_principal is not None:
+                principal_name = compatibility_principal
+            elif assignments_initialized:
+                assert workshop_id is not None
+                principal_name = str(
+                    bootstrap_human_principal_id(
+                        workshop_id,
+                        "telegram",
+                        str(runtime_config_id),
+                    )
+                )
+            else:
+                # A first installation has no Workshop namespace from which
+                # to derive the future principal. The initial service start
+                # bootstraps it, and the next install migrates this empty
+                # compatibility slot to the canonical directory.
+                principal_name = str(runtime_config_id)
+        if profile.os_user is not None:
+            try:
+                pwd.getpwnam(profile.os_user)
+            except KeyError as exc:
+                raise ValueError(
+                    f"Protected runtime profile {profile.profile_id} names os_user "
+                    f"{profile.os_user!r}, which does not exist on this host"
+                ) from exc
+        targets.append(
+            _RuntimeStorageTarget(
+                runtime_config_id=runtime_config_id,
+                profile_id=str(profile.profile_id),
+                storage_name=principal_name,
+                os_user=profile.os_user,
+                backend=profile.backend,
+                home_workspace=profile.home_workspace,
+            )
+        )
+    storage_owners: dict[str, str] = {}
+    for target in targets:
+        prior_profile = storage_owners.get(target.storage_name)
+        if prior_profile is not None:
+            raise RuntimeError(
+                "Protected runtime profiles resolve to the same canonical human storage owner: "
+                f"{prior_profile}, {target.profile_id}"
+            )
+        storage_owners[target.storage_name] = target.profile_id
+    return tuple(targets)
+
+
 def _rewrite_managed_home_path(value: str, legacy_home: Path, canonical_home: Path) -> str | None:
     """Rewrite an exact managed-home prefix without resolving symlinks."""
     try:
@@ -4564,6 +4722,7 @@ def _apply_migrate(
     dry_run: bool,
     users_yaml_path: Path | None = None,
     default_backend: str | None = None,
+    runtime_storage_targets: tuple[_RuntimeStorageTarget, ...] | None = None,
 ) -> None:
     """
     Migrate runtime data from the development directory to the data directory.
@@ -4586,6 +4745,9 @@ def _apply_migrate(
             a per-user backend. Production apply always supplies it. ``None``
             is retained for focused helper tests and means the installer must
             preserve, rather than infer, any backend-specific adapter.
+        runtime_storage_targets: Prevalidated protected-profile provisioning
+            targets. Production apply supplies these; ``None`` retains the
+            compatibility helper behavior used by focused migration tests.
     """
     # None resolves to the module-level USERS_YAML at call time rather
     # than in the signature: a def-time default would bake the
@@ -4674,7 +4836,22 @@ def _apply_migrate(
     # the resolved install path (post-_apply_secrets, default
     # /etc/kai/users.yaml) so that all known operators get a seeded
     # directory on the install where this code first lands.
-    memory_owners = _collect_user_memory_owners(users_yaml_path)
+    if runtime_storage_targets is None:
+        memory_owners = _collect_user_memory_owners(users_yaml_path)
+        protected_storage_names: dict[str, str] = {}
+        protected_home_overrides: dict[int, Path] | None = None
+        protected_backends: dict[int, str | None] | None = None
+    else:
+        memory_owners = [(target.runtime_config_id, target.os_user) for target in runtime_storage_targets]
+        protected_storage_names = {
+            str(target.runtime_config_id): target.storage_name for target in runtime_storage_targets
+        }
+        protected_home_overrides = {
+            target.runtime_config_id: target.home_workspace
+            for target in runtime_storage_targets
+            if target.home_workspace is not None
+        }
+        protected_backends = {target.runtime_config_id: target.backend for target in runtime_storage_targets}
     memory_root = data_path / "memory"
     legacy_global = memory_root / "MEMORY.md"
     template = PROJECT_ROOT / "templates" / ".claude" / "MEMORY.md"
@@ -4709,7 +4886,11 @@ def _apply_migrate(
     known_user_dir_names = {str(chat_id) for chat_id, _os_user in memory_owners if chat_id is not None}
     canonical_reader_users = _canonical_storage_reader_users(data_path, reader_users)
     canonical_principal_names = _canonical_principal_storage_names(data_path)
+    canonical_principal_names.update(protected_storage_names)
     reader_users.update(canonical_reader_users)
+    for target in runtime_storage_targets or ():
+        if target.os_user is not None:
+            reader_users[target.storage_name] = target.os_user
     known_user_dir_names.update(canonical_principal_names.values())
     for legacy_name, principal_name in canonical_principal_names.items():
         owner = per_user_ids.get(legacy_name)
@@ -4986,7 +5167,9 @@ def _apply_migrate(
     # Subdirectories whose chat_id has no os_user fall through to the
     # service-owned tier, matching the memory tier-(a) rule above.
     home_root = data_path / "home"
-    home_overrides = _collect_user_home_overrides(users_yaml_path)
+    home_overrides = (
+        _collect_user_home_overrides(users_yaml_path) if protected_home_overrides is None else protected_home_overrides
+    )
     managed_home_migrations: dict[int, tuple[Path, Path]] = {}
     for chat_id, _os_user in memory_owners:
         if chat_id is None or chat_id in home_overrides:
@@ -5099,7 +5282,11 @@ def _apply_migrate(
     # losslessly before compatibility files are changed.
     home_template = PROJECT_ROOT / "templates" / "AGENTS.md"
     home_template_exists = home_template.is_file()
-    effective_backends = _collect_user_effective_backends(users_yaml_path, default_backend)
+    effective_backends = (
+        _collect_user_effective_backends(users_yaml_path, default_backend)
+        if protected_backends is None
+        else protected_backends
+    )
 
     # Validate every managed identity surface before changing any of them.
     # This prevents a conflict for a later user from leaving earlier users
@@ -5503,7 +5690,7 @@ def _cmd_apply() -> None:
     # backward-compatible schema enrichment; absence produces the
     # deterministic one-time users.yaml migration.
     try:
-        runtime_policy_action, runtime_policy_content, _runtime_policy = _runtime_policy_apply_plan(
+        runtime_policy_action, runtime_policy_content, runtime_policy = _runtime_policy_apply_plan(
             service_user,
             env,
             effective_users_yaml,
@@ -5511,6 +5698,17 @@ def _cmd_apply() -> None:
     except ValueError as exc:
         raise SystemExit(
             f"Protected runtime policy preflight failed; no installation changes were made:\n{exc}"
+        ) from exc
+
+    try:
+        runtime_storage_targets = _runtime_storage_targets(
+            Path(data_dir),
+            runtime_policy,
+            effective_users_yaml,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(
+            f"Protected runtime storage preflight failed; no installation changes were made:\n{exc}"
         ) from exc
 
     dry_run = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes")
@@ -5632,7 +5830,13 @@ def _cmd_apply() -> None:
         )
 
         # -- Step 6: Deploy installed backend registry --
-        _apply_backend_registry(service_user, env, dry_run, users_yaml_path=effective_users_yaml)
+        _apply_backend_registry(
+            service_user,
+            env,
+            dry_run,
+            users_yaml_path=effective_users_yaml,
+            runtime_profiles=runtime_policy,
+        )
 
         # -- Step 6b: Deploy independent protected runtime policy --
         _apply_runtime_policy(runtime_policy_action, runtime_policy_content, dry_run)
@@ -5649,6 +5853,7 @@ def _cmd_apply() -> None:
             svc_gid,
             dry_run,
             agent_backend=agent_backend,
+            runtime_profiles=runtime_policy,
         )
 
         # -- Step 8: Configure sudoers --
@@ -5656,6 +5861,7 @@ def _cmd_apply() -> None:
             service_user,
             dry_run,
             agent_backend=agent_backend,
+            runtime_profiles=runtime_policy,
         )
 
         # -- Step 9: Migrate runtime data --
@@ -5666,6 +5872,7 @@ def _cmd_apply() -> None:
             svc_gid,
             dry_run,
             default_backend=agent_backend,
+            runtime_storage_targets=runtime_storage_targets,
         )
 
         # -- Step 10: Generate service definition --
@@ -7064,10 +7271,15 @@ def _backend_command_trust_issues(command: str, username: str) -> tuple[str, ...
 
 
 def _backend_command_trust_warnings(
-    commands: dict[str, str], service_user: str, users_yaml_path: str | Path
+    commands: dict[str, str],
+    service_user: str,
+    users_yaml_path: str | Path,
+    runtime_profiles: WorkshopRuntimeProfileRegistry | None = None,
 ) -> tuple[str, ...]:
     """Return warnings for registered commands modifiable by agent identities."""
     target_users = [service_user, *_collect_os_users_from_yaml(users_yaml_path)]
+    if runtime_profiles is not None:
+        target_users.extend(profile.os_user for profile in runtime_profiles.profiles if profile.os_user is not None)
     seen_users: set[str] = set()
     warnings: list[str] = []
     for username in target_users:
@@ -7088,6 +7300,7 @@ def _apply_backend_registry(
     env: dict[str, str],
     dry_run: bool,
     users_yaml_path: str | Path | None = None,
+    runtime_profiles: WorkshopRuntimeProfileRegistry | None = None,
 ) -> None:
     """Write the non-secret installed backend registry."""
     if users_yaml_path is None:
@@ -7100,7 +7313,12 @@ def _apply_backend_registry(
         for backend, entry in raw_backends.items()
         if isinstance(entry, dict) and isinstance(entry.get("command"), str)
     }
-    trust_warnings = _backend_command_trust_warnings(commands, service_user, users_yaml_path)
+    trust_warnings = _backend_command_trust_warnings(
+        commands,
+        service_user,
+        users_yaml_path,
+        runtime_profiles,
+    )
     if trust_warnings:
         print("Warning: local-process backend executable trust is limited:", file=sys.stderr)
         for warning in trust_warnings:
@@ -7128,13 +7346,15 @@ def _apply_goose_config(
     dry_run: bool,
     users_yaml_path: str | Path | None = None,
     agent_backend: str = "",
+    runtime_profiles: WorkshopRuntimeProfileRegistry | None = None,
 ) -> None:
     """
-    Deploy the Goose extension config to every home goose runs from.
+    Deploy the Goose extension config to every home Goose runs from.
 
     Copies config/goose-config.yaml from the install tree to
     `~/.config/goose/config.yaml` for the service user AND for each
-    distinct goose-backed `os_user` in users.yaml, so `goose acp`
+    distinct Goose-backed `os_user` in protected runtime policy (with
+    users.yaml retained for direct helper compatibility), so `goose acp`
     picks up the right extension settings wherever it spawns. The
     service-user copy covers goose-backed users with no os_user (they
     run as the service user); the per-os_user copies cover isolated
@@ -7142,13 +7362,9 @@ def _apply_goose_config(
     config beneath the target user's home. Directories are created if
     missing, with each user's tree owned by that user.
 
-    `agent_backend` is the install's global backend; users.yaml
-    entries without a per-user override inherit it (same contract as
-    `_apply_sudoers`). No-ops when nothing in the install is
-    goose-backed - neither the global backend nor any users.yaml
-    override - so the apply pipeline can call it unconditionally and
-    an install without Goose users is never blocked on the goose
-    template.
+    `agent_backend` and users.yaml remain compatibility inputs for focused
+    helper callers. Production apply supplies the protected runtime registry.
+    The function no-ops when no configured profile uses Goose.
     """
     # None resolves to the module-level USERS_YAML at call time rather
     # than in the signature: a def-time default would bake the
@@ -7161,7 +7377,14 @@ def _apply_goose_config(
     # requirement when some session will spawn `goose acp`. users.yaml
     # is canonical at /etc/kai by this step (the secrets step deploys
     # any staged copy first).
-    if agent_backend != "goose" and "goose" not in _collect_backends_from_yaml(users_yaml_path):
+    profile_backends = (
+        {profile.backend for profile in runtime_profiles.profiles} if runtime_profiles is not None else set()
+    )
+    if (
+        agent_backend != "goose"
+        and "goose" not in _collect_backends_from_yaml(users_yaml_path)
+        and "goose" not in profile_backends
+    ):
         return
 
     src = install_path / "config" / "goose-config.yaml"
@@ -7182,7 +7405,14 @@ def _apply_goose_config(
     targets: list[tuple[Path, int, int]] = [
         (Path(_user_home(service_user)), svc_uid, svc_gid),
     ]
-    for name in _collect_goose_os_users_from_yaml(users_yaml_path, agent_backend):
+    goose_os_users = _collect_goose_os_users_from_yaml(users_yaml_path, agent_backend)
+    if runtime_profiles is not None:
+        goose_os_users.extend(
+            profile.os_user
+            for profile in runtime_profiles.profiles
+            if profile.backend == "goose" and profile.os_user is not None
+        )
+    for name in dict.fromkeys(goose_os_users):
         # An os_user matching the service user is already covered by
         # the unconditional service-user deploy (the runtime self-
         # sudo-skips that case anyway).
@@ -7252,15 +7482,14 @@ def _apply_sudoers(
     opencode_bin: str | None = None,
     goose_bin: str | None = None,
     agent_backend: str = "",
+    runtime_profiles: WorkshopRuntimeProfileRegistry | None = None,
 ) -> None:
     """
     Write sudoers rules for the service user to read protected config.
 
-    Loads `users_yaml_path` (None means the module-level USERS_YAML,
-    resolved at call time) to discover every distinct `os_user` the
-    runtime may target via `sudo -u`, so each gets a matching
-    SETENV: NOPASSWD: rule. Without this, hand-added per-user rules
-    were silently wiped on every `sudo make install`.
+    Production apply discovers every distinct `os_user` from protected runtime
+    policy, so each target of `sudo -u` gets a matching SETENV: NOPASSWD rule.
+    `users_yaml_path` remains a compatibility input for direct helper callers.
 
     Backend command paths are resolved from installer discovery and
     rendered into /etc/kai/backends.yaml. This function reuses the
@@ -7269,9 +7498,9 @@ def _apply_sudoers(
     for direct/dev formatter compatibility; `_cmd_apply` does not feed
     them from install.conf or process environment.
 
-    `agent_backend` is the install's resolved global backend. Together
-    with the per-user backend overrides in users.yaml it scopes the
-    missing-binary backstop below to backends the install actually uses.
+    `runtime_profiles` scopes protected per-profile identities and backend
+    checks. `agent_backend` and users.yaml retain compatibility coverage for
+    the global/default runtime path.
     """
     # None resolves to the module-level USERS_YAML at call time rather
     # than in the signature: a def-time default would bake the
@@ -7286,6 +7515,15 @@ def _apply_sudoers(
     # dry run, since the operator's next step is `sudo make install` which
     # would hit the same error with worse blast radius (partial install).
     os_users = _collect_os_users_from_yaml(users_yaml_path)
+    if runtime_profiles is not None:
+        os_users = list(
+            dict.fromkeys(
+                [
+                    *os_users,
+                    *(profile.os_user for profile in runtime_profiles.profiles if profile.os_user is not None),
+                ]
+            )
+        )
     registry_entries = _backend_registry_entries(service_user, {"DEFAULT_BACKEND": agent_backend}, users_yaml_path)
     registry_commands = {
         backend: str(entry["command"])
@@ -7319,6 +7557,8 @@ def _apply_sudoers(
     # backend switch cannot strand a user without a rule.
     if os_users:
         backends_in_use = {agent_backend} | _collect_backends_from_yaml(users_yaml_path)
+        if runtime_profiles is not None:
+            backends_in_use.update(profile.backend for profile in runtime_profiles.profiles)
         # Each entry's path must resolve to exactly what _generate_sudoers
         # pins for that backend's rule (including the fallbacks); a new
         # backend with a sudoers rule needs an entry in both places.
@@ -7573,6 +7813,7 @@ def _cmd_status() -> None:
     platform = "darwin" if sys.platform == "darwin" else "linux"
     install_dir = _DEFAULT_INSTALL_DIR
     data_dir = _DEFAULT_DATA_DIR
+    service_user = _DEFAULT_SERVICE_USER
     conf_env: dict[str, str] | None = None
     if INSTALL_CONF.exists():
         try:
@@ -7580,6 +7821,7 @@ def _cmd_status() -> None:
             platform = conf.get("platform", platform)
             install_dir = conf.get("install_dir", install_dir)
             data_dir = conf.get("data_dir", data_dir)
+            service_user = conf.get("service_user", service_user)
             raw_env = conf.get("env", {})
             if isinstance(raw_env, dict):
                 conf_env = {str(key): str(value) for key, value in raw_env.items()}
@@ -7602,6 +7844,15 @@ def _cmd_status() -> None:
         print(_webhook_secret_migration_status(conf_env, source="install.conf artifact"))
 
     print(_runtime_policy_status(RUNTIME_PROFILES_YAML, BACKENDS_YAML))
+    print(
+        _runtime_storage_status(
+            Path(data_dir),
+            service_user,
+            RUNTIME_PROFILES_YAML,
+            BACKENDS_YAML,
+            USERS_YAML,
+        )
+    )
 
     expected_humans: int | None = None
     if os.geteuid() == 0:
@@ -7665,6 +7916,132 @@ def _runtime_policy_status(policy_path: Path, backend_registry_path: Path) -> st
         return f"{prefix} INVALID ({type(exc).__name__})"
     backends = ",".join(sorted({profile.backend for profile in profiles.profiles}))
     return f"{prefix} initialized; profiles={len(profiles.profiles)}, backends={backends}"
+
+
+def _runtime_storage_status(
+    data_path: Path,
+    service_user: str,
+    policy_path: Path,
+    backend_registry_path: Path,
+    users_yaml_path: Path,
+) -> str:
+    """Return non-secret protected-profile storage provisioning coverage."""
+    prefix = "Workshop runtime storage:"
+    try:
+        backend_document = yaml.safe_load(backend_registry_path.read_text(encoding="utf-8"))
+        raw_backends = backend_document.get("backends") if isinstance(backend_document, dict) else None
+        backend_ids = raw_backends if isinstance(raw_backends, dict) else {}
+        profiles = WorkshopRuntimeProfileRegistry.from_yaml(
+            policy_path.read_text(encoding="utf-8"),
+            backend_registry=backend_ids,
+        )
+        targets = _runtime_storage_targets(data_path, profiles, users_yaml_path)
+        service_entry = pwd.getpwnam(service_user)
+    except (OSError, KeyError, RuntimeError, ValueError, yaml.YAMLError, WorkshopRuntimeProfileError) as exc:
+        return f"{prefix} NOT VERIFIED ({type(exc).__name__})"
+
+    managed = 0
+    operator_managed = 0
+    incomplete = 0
+    issues = {"home": 0, "identity": 0, "memory": 0, "preferences": 0, "temp": 0}
+    resolved_data_path = data_path.resolve()
+
+    def owned_private_directory(path: Path, owner: tuple[int, int]) -> bool:
+        try:
+            path_stat = path.stat()
+        except OSError:
+            return False
+        return (
+            path.is_dir()
+            and stat.S_IMODE(path_stat.st_mode) == _PRIVATE_USER_DIR_MODE
+            and (path_stat.st_uid, path_stat.st_gid) == owner
+        )
+
+    def owned_private_file(path: Path, owner: tuple[int, int]) -> bool:
+        try:
+            path_stat = path.stat()
+        except OSError:
+            return False
+        return (
+            path.is_file()
+            and stat.S_IMODE(path_stat.st_mode) == _PRIVATE_USER_FILE_MODE
+            and (path_stat.st_uid, path_stat.st_gid) == owner
+        )
+
+    for target in targets:
+        try:
+            expected_entry = pwd.getpwnam(target.os_user) if target.os_user is not None else service_entry
+            expected_owner = (expected_entry.pw_uid, expected_entry.pw_gid)
+        except KeyError:
+            expected_owner = (-1, -1)
+
+        memory_dir = data_path / "memory" / target.storage_name
+        preferences_dir = data_path / "preferences" / target.storage_name
+        memory_complete = owned_private_directory(memory_dir, expected_owner) and owned_private_file(
+            memory_dir / "MEMORY.md",
+            expected_owner,
+        )
+        preferences_complete = owned_private_directory(
+            preferences_dir,
+            expected_owner,
+        ) and owned_private_file(
+            preferences_dir / "PREFERENCES.md",
+            expected_owner,
+        )
+        temp_complete = target.os_user is None or owned_private_directory(
+            data_path / "tmp" / target.os_user,
+            expected_owner,
+        )
+
+        if target.home_workspace is None:
+            home = data_path / "home" / target.storage_name
+            installer_managed = True
+        else:
+            home = target.home_workspace
+            installer_managed = home.is_relative_to(resolved_data_path)
+        if not installer_managed:
+            operator_managed += 1
+            home_complete = home.is_dir()
+            identity_complete = True
+        else:
+            managed += 1
+            home_complete = owned_private_directory(home, expected_owner)
+            agents_path = home / "AGENTS.md"
+            claude_path = home / ".claude" / "CLAUDE.md"
+            identity_complete = owned_private_file(agents_path, expected_owner)
+            if target.backend == "claude":
+                try:
+                    identity_complete = (
+                        identity_complete
+                        and owned_private_file(claude_path, expected_owner)
+                        and claude_path.read_text() == _CLAUDE_IDENTITY_ADAPTER
+                    )
+                except OSError:
+                    identity_complete = False
+            else:
+                identity_complete = identity_complete and not claude_path.exists()
+
+        checks = {
+            "home": home_complete,
+            "identity": identity_complete,
+            "memory": memory_complete,
+            "preferences": preferences_complete,
+            "temp": temp_complete,
+        }
+        if not all(checks.values()):
+            incomplete += 1
+            for category, complete in checks.items():
+                issues[category] += int(not complete)
+
+    state = "complete" if incomplete == 0 else "INCOMPLETE"
+    result = (
+        f"{prefix} {state}; profiles={len(targets)}, managed={managed}, "
+        f"operator-managed={operator_managed}, incomplete={incomplete}"
+    )
+    if incomplete:
+        issue_summary = ", ".join(f"{category}={count}" for category, count in issues.items())
+        result += f"; issues: {issue_summary}"
+    return result
 
 
 def _webhook_secret_migration_status(env: dict[str, str], *, source: str = "install.conf artifact") -> str:

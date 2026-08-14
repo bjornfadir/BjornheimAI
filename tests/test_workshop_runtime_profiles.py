@@ -89,6 +89,9 @@ def test_registry_rejects_duplicate_configuration_authority():
         "gpt-5.6-sol",
         120,
         (),
+        None,
+        None,
+        (),
     )
 
     with pytest.raises(WorkshopRuntimeProfileError, match="Duplicate runtime profile ID"):
@@ -110,6 +113,7 @@ def test_document_preserves_migrated_profile_identity_and_compatibility_key():
                     "model": "gpt-5.6-sol",
                     "timeout_seconds": 240,
                     "allowed_services": ["perplexity", "weather"],
+                    "allowed_workspaces": [],
                 }
             },
         },
@@ -127,6 +131,165 @@ def test_document_preserves_migrated_profile_identity_and_compatibility_key():
     assert profile.allowed_services == ("perplexity", "weather")
 
 
+def test_document_owns_resolved_workspace_policy(tmp_path):
+    home = tmp_path / "home"
+    base = tmp_path / "projects"
+    extra = tmp_path / "external"
+    for path in (home, base, extra):
+        path.mkdir()
+    profile_id = runtime_profile_id_for_config_id(101)
+
+    profile = WorkshopRuntimeProfileRegistry.from_document(
+        {
+            "version": 1,
+            "runtime_profiles": {
+                str(profile_id): {
+                    "display_name": "Daniel coding",
+                    "compatibility_runtime_config_id": 101,
+                    "backend": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "timeout_seconds": 120,
+                    "allowed_services": [],
+                    "home_workspace": str(home / "."),
+                    "workspace_base": str(base / "."),
+                    "allowed_workspaces": [str(extra / ".")],
+                }
+            },
+        },
+        backend_registry={"codex": {}},
+    ).resolve(profile_id)
+
+    assert profile.home_workspace == home.resolve()
+    assert profile.workspace_base == base.resolve()
+    assert profile.allowed_workspaces == (extra.resolve(),)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("home_workspace", "relative", "must be an absolute path"),
+        ("workspace_base", "relative", "must be an absolute path"),
+        ("allowed_workspaces", "not-a-list", "must be a list"),
+    ),
+)
+def test_document_rejects_invalid_workspace_policy(field, value, message):
+    profile_id = runtime_profile_id_for_config_id(101)
+    entry = {
+        "display_name": "Daniel coding",
+        "compatibility_runtime_config_id": 101,
+        "backend": "codex",
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "timeout_seconds": 120,
+        "allowed_services": [],
+        "allowed_workspaces": [],
+    }
+    entry[field] = value
+
+    with pytest.raises(WorkshopRuntimeProfileError, match=message):
+        WorkshopRuntimeProfileRegistry.from_document(
+            {
+                "version": 1,
+                "runtime_profiles": {str(profile_id): entry},
+            },
+            backend_registry={"codex": {}},
+        )
+
+
+def test_document_rejects_duplicate_resolved_allowed_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profile_id = runtime_profile_id_for_config_id(101)
+
+    with pytest.raises(WorkshopRuntimeProfileError, match="duplicated"):
+        WorkshopRuntimeProfileRegistry.from_document(
+            {
+                "version": 1,
+                "runtime_profiles": {
+                    str(profile_id): {
+                        "display_name": "Daniel coding",
+                        "compatibility_runtime_config_id": 101,
+                        "backend": "codex",
+                        "provider": "openai",
+                        "model": "gpt-5.6-sol",
+                        "timeout_seconds": 120,
+                        "allowed_services": [],
+                        "allowed_workspaces": [str(workspace), str(workspace / ".")],
+                    }
+                },
+            },
+            backend_registry={"codex": {}},
+        )
+
+
+def test_unavailable_workspace_paths_remain_restrictive_and_do_not_create_false_drift(tmp_path):
+    unavailable = (tmp_path / "later-mounted").resolve()
+    profile_id = runtime_profile_id_for_config_id(101)
+    registry = WorkshopRuntimeProfileRegistry.from_document(
+        {
+            "version": 1,
+            "runtime_profiles": {
+                str(profile_id): {
+                    "display_name": "Daniel",
+                    "compatibility_runtime_config_id": 101,
+                    "os_user": "daniel",
+                    "backend": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "timeout_seconds": 120,
+                    "allowed_services": [],
+                    "home_workspace": str(unavailable),
+                    "workspace_base": str(unavailable),
+                    "allowed_workspaces": [str(unavailable)],
+                }
+            },
+        },
+        backend_registry={"codex": {}},
+    )
+    unavailable_profile = registry.resolve(profile_id)
+    assert unavailable_profile.workspace_base == unavailable
+    registry._validate_compatibility_projection(
+        Config(
+            telegram_bot_token="test",
+            allowed_user_ids={101},
+            default_backend="codex",
+            default_provider="openai",
+            default_model="gpt-5.6-sol",
+            user_configs={
+                101: UserConfig(
+                    telegram_id=101,
+                    name="Daniel",
+                    os_user="daniel",
+                    backend="codex",
+                )
+            },
+        )
+    )
+
+    unavailable.mkdir()
+    registry._validate_compatibility_projection(
+        Config(
+            telegram_bot_token="test",
+            allowed_user_ids={101},
+            default_backend="codex",
+            default_provider="openai",
+            default_model="gpt-5.6-sol",
+            user_configs={
+                101: UserConfig(
+                    telegram_id=101,
+                    name="Daniel",
+                    os_user="daniel",
+                    backend="codex",
+                    home_workspace=unavailable,
+                    workspace_base=unavailable,
+                    allowed_workspaces=[unavailable],
+                )
+            },
+        )
+    )
+
+
 def test_non_telegram_profile_derives_stable_private_compatibility_key():
     profile_id = RuntimeProfileId("rtp_11111111111111111111111111111111")
     first = WorkshopRuntimeProfileRegistry.from_document(
@@ -140,6 +303,7 @@ def test_non_telegram_profile_derives_stable_private_compatibility_key():
                     "model": "openai-codex/gpt-5.5",
                     "timeout_seconds": 120,
                     "allowed_services": [],
+                    "allowed_workspaces": [],
                 }
             },
         },
@@ -156,6 +320,7 @@ def test_non_telegram_profile_derives_stable_private_compatibility_key():
                     "model": "openai-codex/gpt-5.5",
                     "timeout_seconds": 120,
                     "allowed_services": [],
+                    "allowed_workspaces": [],
                 }
             },
         },
@@ -191,6 +356,7 @@ def test_document_accepts_each_registered_backend_without_priority(backend, prov
                     "model": model,
                     "timeout_seconds": 120,
                     "allowed_services": [],
+                    "allowed_workspaces": [],
                 }
             },
         },
@@ -215,6 +381,7 @@ def test_document_rejects_backend_absent_from_protected_registry():
                         "model": "gpt-5.5",
                         "timeout_seconds": 120,
                         "allowed_services": [],
+                        "allowed_workspaces": [],
                     }
                 },
             },
@@ -238,6 +405,7 @@ def test_document_rejects_provider_not_supported_by_backend(backend):
                         "model": "sonnet",
                         "timeout_seconds": 120,
                         "allowed_services": [],
+                        "allowed_workspaces": [],
                     }
                 },
             },
@@ -261,6 +429,7 @@ def test_single_provider_backend_defaults_only_when_provider_is_omitted(backend,
                     "model": "sonnet" if backend == "claude" else "gpt-5.5",
                     "timeout_seconds": 120,
                     "allowed_services": [],
+                    "allowed_workspaces": [],
                 }
             },
         },
@@ -286,6 +455,7 @@ def test_document_rejects_invalid_os_user():
                         "model": "gpt-5.5",
                         "timeout_seconds": 120,
                         "allowed_services": [],
+                        "allowed_workspaces": [],
                     }
                 },
             },
@@ -312,6 +482,7 @@ def test_document_fails_closed_on_invalid_model_or_timeout(field, value, message
         "model": "gpt-5.5",
         "timeout_seconds": 120,
         "allowed_services": [],
+        "allowed_workspaces": [],
     }
     if value is None:
         profile.pop(field)
@@ -378,6 +549,7 @@ def test_document_enforces_loaded_backend_registry_model_ceiling():
                         "model": "gpt-5.5",
                         "timeout_seconds": 120,
                         "allowed_services": [],
+                        "allowed_workspaces": [],
                     }
                 },
             },
@@ -400,6 +572,7 @@ def test_document_rejects_unknown_backend_registry_entry_type():
                         "model": "gpt-5.5",
                         "timeout_seconds": 120,
                         "allowed_services": [],
+                        "allowed_workspaces": [],
                     }
                 },
             },
@@ -444,6 +617,7 @@ runtime_profiles:
     model: openai-codex/gpt-5.5
     timeout_seconds: 120
     allowed_services: []
+    allowed_workspaces: []
 """
     )
     monkeypatch.setattr(
@@ -481,6 +655,7 @@ runtime_profiles:
     model: sonnet
     timeout_seconds: 120
     allowed_services: []
+    allowed_workspaces: []
 """
     )
     monkeypatch.setattr(
@@ -507,6 +682,7 @@ runtime_profiles:
     model: gpt-5.5
     timeout_seconds: 999
     allowed_services: []
+    allowed_workspaces: []
 """
     )
     monkeypatch.setattr(
@@ -534,6 +710,7 @@ runtime_profiles:
     timeout_seconds: 120
     allowed_services:
       - perplexity
+    allowed_workspaces: []
 """
     )
     monkeypatch.setattr(
@@ -564,6 +741,7 @@ runtime_profiles:
     allowed_services:
       - weather
       - perplexity
+    allowed_workspaces: []
   {runtime_profile_id_for_config_id(202)}:
     display_name: Scott
     compatibility_runtime_config_id: 202
@@ -573,6 +751,7 @@ runtime_profiles:
     model: sonnet
     timeout_seconds: 120
     allowed_services: []
+    allowed_workspaces: []
 """
     )
     monkeypatch.setattr(

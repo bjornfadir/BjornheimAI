@@ -45,10 +45,12 @@ class TestRuntimeAssignmentPolicy:
                         "display_name": "Browser coding",
                         "backend": "codex",
                         "provider": "openai",
+                        "model": "gpt-5.5",
+                        "timeout_seconds": 120,
                     }
                 },
             },
-            backend_registry={"codex": object()},
+            backend_registry={"codex": {}},
         )
         try:
             human = await WorkshopHumanProvisioner(store).provision(

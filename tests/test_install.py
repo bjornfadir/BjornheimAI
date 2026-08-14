@@ -8284,8 +8284,16 @@ class TestIndependentRuntimePolicy:
 
         rendered = _build_migrated_runtime_profiles(
             users_yaml,
-            {"DEFAULT_BACKEND": "codex", "DEFAULT_PROVIDER": "openai"},
-            service_user="kai",
+            registry_entries={
+                "codex": {"allowed_models": sorted(kai.install.CODEX_MODELS)},
+                "claude": {"allowed_models": ["haiku", "opus", "sonnet", "claude-*"]},
+            },
+            defaults=kai.install._RuntimePolicyDefaults(
+                backend="codex",
+                provider="openai",
+                model="gpt-5.5",
+                timeout_seconds=120,
+            ),
         )
         document = yaml.safe_load(rendered)
 
@@ -8297,10 +8305,58 @@ class TestIndependentRuntimePolicy:
             "compatibility_runtime_config_id": 101,
             "backend": "codex",
             "provider": "openai",
+            "model": "gpt-5.5",
+            "timeout_seconds": 120,
             "os_user": "daniel",
         }
         assert document["runtime_profiles"][scott_id]["backend"] == "claude"
         assert document["runtime_profiles"][scott_id]["provider"] == "anthropic"
+        assert document["runtime_profiles"][scott_id]["model"] == "sonnet"
+        assert document["runtime_profiles"][scott_id]["timeout_seconds"] == 120
+
+    def test_migration_validates_against_registry_being_installed(self, tmp_path, monkeypatch):
+        users_yaml = tmp_path / "users.yaml"
+        users_yaml.write_text(
+            """users:
+  - telegram_id: 101
+    name: Daniel
+    role: admin
+    backend: codex
+    model: gpt-5.6-sol
+"""
+        )
+        old_registry = tmp_path / "backends.yaml"
+        old_registry.write_text(
+            """version: 1
+backends:
+  codex:
+    driver: codex
+    runtime: local_process
+    command: /usr/local/bin/codex
+    allowed_models:
+      - gpt-5.5
+"""
+        )
+        monkeypatch.setenv("KAI_BACKENDS_YAML", str(old_registry))
+
+        rendered = _build_migrated_runtime_profiles(
+            users_yaml,
+            registry_entries={
+                "codex": {
+                    "command": "/usr/local/bin/codex",
+                    "allowed_models": ["gpt-5.5", "gpt-5.6-sol"],
+                }
+            },
+            defaults=kai.install._RuntimePolicyDefaults(
+                backend="codex",
+                provider="openai",
+                model="gpt-5.5",
+                timeout_seconds=120,
+            ),
+        )
+
+        profile = next(iter(yaml.safe_load(rendered)["runtime_profiles"].values()))
+        assert profile["model"] == "gpt-5.6-sol"
 
     def test_status_reports_only_profile_count_and_backend_ids(self, tmp_path):
         profile_id = str(kai.install.runtime_profile_id_for_config_id(101))
@@ -8315,6 +8371,8 @@ class TestIndependentRuntimePolicy:
                             "compatibility_runtime_config_id": 101,
                             "backend": "codex",
                             "provider": "openai",
+                            "model": "gpt-5.5",
+                            "timeout_seconds": 120,
                         }
                     },
                 }
@@ -8373,6 +8431,83 @@ class TestIndependentRuntimePolicy:
         _apply_runtime_policy("preserve", "replacement-must-not-land\n", dry_run=False)
 
         assert policy.read_text() == "operator-authored\n"
+
+    def test_apply_writes_backward_compatible_policy_enrichment(self, tmp_path, monkeypatch):
+        policy = tmp_path / "runtime-profiles.yaml"
+        policy.write_text("old-policy\n")
+        monkeypatch.setattr("kai.install.RUNTIME_PROFILES_YAML", policy)
+        monkeypatch.setattr("kai.install.os.chown", lambda *args: None)
+
+        _apply_runtime_policy("upgrade", "enriched-policy\n", dry_run=False)
+
+        assert policy.read_text() == "enriched-policy\n"
+
+    def test_apply_plan_enriches_existing_policy_without_replacing_profile_identity(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        users_yaml = tmp_path / "users.yaml"
+        users_yaml.write_text(
+            """users:
+  - telegram_id: 101
+    name: Daniel
+    role: admin
+    os_user: daniel
+    backend: codex
+    model: gpt-5.6-sol
+    timeout: 345
+"""
+        )
+        profile_id = str(kai.install.runtime_profile_id_for_config_id(101))
+        policy = tmp_path / "runtime-profiles.yaml"
+        policy.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "runtime_profiles": {
+                        profile_id: {
+                            "display_name": "Operator display name",
+                            "compatibility_runtime_config_id": 101,
+                            "os_user": "daniel",
+                            "backend": "codex",
+                            "provider": "openai",
+                        }
+                    },
+                },
+                sort_keys=False,
+            )
+        )
+        monkeypatch.setattr("kai.install.RUNTIME_PROFILES_YAML", policy)
+        monkeypatch.setattr(
+            "kai.install._discover_backend_commands",
+            lambda _service_user: {"codex": "/usr/local/bin/codex"},
+        )
+        monkeypatch.setattr(
+            "kai.install._backend_registry_entries",
+            lambda *args: {
+                "codex": {
+                    "allowed_models": ["gpt-5.5", "gpt-5.6-sol"],
+                }
+            },
+        )
+
+        action, content, profiles = _runtime_policy_apply_plan(
+            "kai",
+            {
+                "DEFAULT_PROVIDER": "openai",
+                "DEFAULT_TIMEOUT": "120",
+            },
+            users_yaml,
+        )
+
+        document = yaml.safe_load(content)
+        assert action == "upgrade"
+        assert list(document["runtime_profiles"]) == [profile_id]
+        assert document["runtime_profiles"][profile_id]["display_name"] == "Operator display name"
+        assert document["runtime_profiles"][profile_id]["model"] == "gpt-5.6-sol"
+        assert document["runtime_profiles"][profile_id]["timeout_seconds"] == 345
+        assert profiles.resolve(profile_id).runtime_config_id == 101
 
     def test_existing_policy_must_cover_every_migrated_profile(self, tmp_path, monkeypatch):
         users_yaml = tmp_path / "users.yaml"

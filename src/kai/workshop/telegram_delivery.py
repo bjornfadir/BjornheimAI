@@ -142,7 +142,7 @@ def _classify_telegram_error(error: TelegramError) -> TelegramDeliveryFailure:
     if isinstance(error, RetryAfter):
         # PTB 22 supports both integer and timedelta representations during a
         # deprecation window. Normalize at the adapter boundary without making
-        # Kai's retry timing depend on the process-wide PTB_TIMEDELTA setting.
+        # Bjornheim AI's retry timing depend on the process-wide PTB_TIMEDELTA setting.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", PTBDeprecationWarning)
             retry_after = error.retry_after
@@ -250,7 +250,7 @@ class WorkshopTelegramDeliveryAdapter:
                     parse_mode=ParseMode.MARKDOWN,
                 )
         except BadRequest:
-            # Match Kai's existing presentation behavior: Telegram Markdown
+            # Match Bjornheim AI's existing presentation behavior: Telegram Markdown
             # rejection is retried once as plain text. A second BadRequest is
             # classified as permanent by the common Telegram error policy.
             try:

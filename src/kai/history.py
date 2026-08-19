@@ -4,7 +4,7 @@ Conversation history logging and retrieval.
 Provides functionality to:
 1. Log every user and assistant message as JSONL (one file per day)
 2. Retrieve recent messages for injection into new Claude sessions
-3. Serve as the "episodic memory" layer of Kai's three-layer memory system
+3. Serve as the "episodic memory" layer of Bjornheim AI's three-layer memory system
 
 Log files are stored in per-channel subdirectories under DATA_DIR/history/
 (e.g., DATA_DIR/history/<channel_id>/2026-02-11.jsonl). During the Workshop
@@ -221,7 +221,7 @@ def log_message(
         produces a row pointing at a JSONL line that does not exist.
 
     Args:
-        direction: "user" for inbound messages, "assistant" for Kai's responses.
+        direction: "user" for inbound messages, "assistant" for Bjornheim AI's responses.
         chat_id: Telegram chat ID the message belongs to.
         text: The message text content.
         media: Optional metadata dict for non-text messages (photos, voice, documents).
@@ -324,7 +324,7 @@ def get_recent_history(chat_id: int | None = None) -> str:
     Return a formatted summary of recent messages, scanning back as needed.
 
     Scans date-stamped JSONL files from newest to oldest, collecting up to
-    _MAX_RECENT_MESSAGES messages. This ensures Kai has ambient recall even
+    _MAX_RECENT_MESSAGES messages. This ensures Bjornheim AI has ambient recall even
     after gaps of several days without conversation.
 
     When chat_id is provided, scans only that user's subdirectory
@@ -332,7 +332,7 @@ def get_recent_history(chat_id: int | None = None) -> str:
     per-user isolation was added. When None, scans all subdirectories.
 
     Injected into the first prompt of each new Claude session (in claude.py)
-    to give Kai ambient awareness of recent conversations without loading the
+    to give Bjornheim AI ambient awareness of recent conversations without loading the
     full history. Long messages are truncated and the total count is capped.
 
     Args:
@@ -408,7 +408,7 @@ def get_recent_history(chat_id: int | None = None) -> str:
     lines = []
     for msg in messages:
         ts = msg.get("ts", "")[:16].replace("T", " ")  # "2026-02-11 07:00"
-        speaker = "You" if msg.get("dir") == "user" else "Kai"
+        speaker = "You" if msg.get("dir") == "user" else "Bjornheim AI"
         text = msg.get("text", "")
         if len(text) > _MAX_CHARS_PER_MESSAGE:
             text = text[:_MAX_CHARS_PER_MESSAGE] + "..."

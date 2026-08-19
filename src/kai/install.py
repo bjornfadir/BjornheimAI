@@ -1,5 +1,5 @@
 """
-Protected installation tooling for deploying Kai to /opt/kai/.
+Protected installation tooling for deploying Bjornheim AI to /opt/kai/.
 
 Provides functionality to:
 1. Interactively collect configuration values (config subcommand)
@@ -108,7 +108,7 @@ _DEFAULT_SERVICE_USER = "kai"
 # Current install.conf schema version
 _CONF_VERSION = 1
 
-# Claude discovers instructions through CLAUDE.md, while Kai's canonical
+# Claude discovers instructions through CLAUDE.md, while Bjornheim AI's canonical
 # managed identity is backend-neutral AGENTS.md. Keep the compatibility file
 # deliberately content-free so there is only one editable source of truth.
 _CLAUDE_IDENTITY_ADAPTER = "@../AGENTS.md\n"
@@ -1114,7 +1114,7 @@ def _upgrade_runtime_policy_content(
 ) -> tuple[str, bool]:
     """Add execution-policy fields to documents that predate them.
 
-    The major document version remains 1 so older Kai code ignores the new
+    The major document version remains 1 so older Bjornheim AI code ignores the new
     keys during rollback. Existing values are never overwritten. Profiles
     migrated from users.yaml receive the exact pre-cutover effective values;
     independently authored profiles receive deterministic backend defaults.
@@ -1377,7 +1377,7 @@ def _cmd_config() -> None:
 
     No sudo required - this runs as the current user.
     """
-    print("Kai Installation - Configuration")
+    print("Bjornheim AI Installation - Configuration")
     print("=" * 45)
     print()
 
@@ -1406,7 +1406,7 @@ def _cmd_config() -> None:
     # the service-management apply flow, and `sudo make install` to
     # finalize. This is the existing multi-user / production shape.
     #
-    # `single_user`: the operator runs Kai directly from the repo
+    # `single_user`: the operator runs Bjornheim AI directly from the repo
     # without root. Secrets and per-user config live under the
     # operator's home (.env in PROJECT_ROOT, users.yaml under XDG
     # config home). `make config` writes everything and there is no
@@ -1480,7 +1480,7 @@ def _cmd_config() -> None:
 
     # In single-user mode the install location, data directory,
     # service user, and platform service manager are not relevant:
-    # Kai runs from the cloned repo under the operator's account.
+    # Bjornheim AI runs from the cloned repo under the operator's account.
     # We initialize these fields with stable defaults so downstream
     # install.conf shape stays consistent across modes; nothing reads
     # them in single-user mode but consumers that check for the keys
@@ -1634,7 +1634,7 @@ def _cmd_config() -> None:
             print("  Name may only contain letters, numbers, spaces, hyphens, and underscores.")
 
         if deployment_mode == "protected":
-            # The service account can sudo-cat exact protected Kai files.
+            # The service account can sudo-cat exact protected Bjornheim AI files.
             # A persistent agent running as that identity would inherit
             # those capabilities, so protected mode has no same-user path.
             print("  Protected mode requires a distinct OS account for each interactive user.")
@@ -1648,7 +1648,7 @@ def _cmd_config() -> None:
                     print("  Username may only contain letters, numbers, dots, hyphens, and underscores.")
                     continue
                 if admin_os_user == service_user:
-                    print(f"  Must differ from the Kai service account {service_user!r}.")
+                    print(f"  Must differ from the Bjornheim AI service account {service_user!r}.")
                     continue
                 break
         else:
@@ -1753,7 +1753,7 @@ def _cmd_config() -> None:
     backend_choices = _backend_choices_for_config(service_user)
     if not backend_choices:
         raise SystemExit(
-            "No installed Kai backends were found. Install at least one supported backend "
+            "No installed Bjornheim AI backends were found. Install at least one supported backend "
             "(claude, codex, goose, opencode, or pi) globally, then re-run make config."
         )
     # Prefill reads DEFAULT_BACKEND, falling back to the deprecated
@@ -1821,7 +1821,7 @@ def _cmd_config() -> None:
     # operator names the provider used by the (backend, provider, role)
     # registry; the API-key sub-prompt skips for opencode because
     # opencode auth lives in `~/.local/share/opencode/auth.json` and
-    # is managed via `opencode auth login`, not by Kai. Model selection
+    # is managed via `opencode auth login`, not by Bjornheim AI. Model selection
     # routes through _prompt_default_model later in this function; since
     # models_for_backend("opencode", _) returns None, the operator gets
     # a free-text prompt for a full `provider/model` ID.
@@ -1834,13 +1834,13 @@ def _cmd_config() -> None:
     if agent_backend == "opencode":
         print("  After install, authenticate OpenCode for at least one provider:")
         print("    <service_user> ~$ opencode auth login")
-        print("  Kai writes the active model into OPENCODE_CONFIG_CONTENT at process spawn;")
+        print("  Bjornheim AI writes the active model into OPENCODE_CONFIG_CONTENT at process spawn;")
         print("  OpenCode resolves it against the credentials in ~/.local/share/opencode/auth.json.")
     if agent_backend == "pi":
         print("  After install, authenticate Pi for at least one provider as each target os_user:")
         print("    <os_user> ~$ pi")
         print("    /login")
-        print("  Kai starts Pi with the configured provider/model; Pi resolves credentials")
+        print("  Bjornheim AI starts Pi with the configured provider/model; Pi resolves credentials")
         print("  from that user's ~/.pi/agent/auth.json or provider environment.")
 
     # Multi-provider backends (opencode, goose): operator picks the
@@ -1850,7 +1850,7 @@ def _cmd_config() -> None:
     # membership; their provider is implicit (claude through
     # get_effective_provider, codex always openai). OpenCode also
     # skips the API-key sub-prompt because opencode's auth is
-    # managed by `opencode auth login`, not by Kai; the wizard
+    # managed by `opencode auth login`, not by Bjornheim AI; the wizard
     # captures only the provider name so the registry triple-key
     # can find a row.
     llm_provider = ""
@@ -2869,7 +2869,7 @@ def _set_ownership(path: Path, uid: int, gid: int, recursive: bool = False) -> N
 
 def _set_private_user_tree_modes(path: Path) -> None:
     """
-    Make a user-owned Kai data subtree private without following symlinks.
+    Make a user-owned Bjornheim AI data subtree private without following symlinks.
 
     Directories become 0700; regular files become 0600. Symlinks are skipped:
     chmod(2) would affect the target on most platforms, which is not safe for
@@ -2901,7 +2901,7 @@ def _set_static_install_tree_modes(path: Path) -> bool:
     Installer callers may have a restrictive umask (for example ``077``).
     Directory creation performed by ``mkdir``, ``venv``, and ``pip`` inherits
     that umask, which can otherwise leave root-owned installed code at 0700 and
-    prevent the unprivileged Kai service from importing it.  Static install
+    prevent the unprivileged Bjornheim AI service from importing it.  Static install
     trees contain no secrets: directories are normalized to 0755 and regular
     files to 0644, while files that already carry an executable bit retain an
     executable mode of 0755.  Symlinks are skipped so chmod never follows an
@@ -3021,7 +3021,7 @@ def _generate_env_file(env: dict[str, str]) -> str:
     Returns:
         The file contents as a string.
     """
-    lines = ["# Kai environment - managed by 'python -m kai install apply'"]
+    lines = ["# Bjornheim AI environment - managed by 'python -m kai install apply'"]
     lines.append("# Do not edit manually; re-run install config + apply instead.")
     lines.append("")
     for key, value in sorted(env.items()):
@@ -3069,7 +3069,7 @@ def _generate_users_yaml(
         return yaml.dump(value, default_flow_style=True).rstrip("\n").removesuffix("...").rstrip("\n")
 
     lines = [
-        "# Kai user configuration - generated by 'python -m kai install config'",
+        "# Bjornheim AI user configuration - generated by 'python -m kai install config'",
         "# See README (Multi-User section) for all available fields.",
         "",
         "users:",
@@ -3474,7 +3474,7 @@ def _collect_user_home_overrides(users_yaml_path: str | Path) -> dict[int, Path]
 
     Used by the install migration to decide which `home/<chat_id>/`
     subdirectories to skip pre-creating: a user who pinned an explicit
-    home_workspace path is opting out of the Kai-managed per-user
+    home_workspace path is opting out of the Bjornheim AI-managed per-user
     directory (#353), so the installer should not provision one for
     them. Their override path is the operator's responsibility.
 
@@ -3562,7 +3562,7 @@ def _generate_sudoers(
     this formatter without registry-derived paths.
 
     Args:
-        service_user: The OS username that runs the Kai service.
+        service_user: The OS username that runs the Bjornheim AI service.
         os_users: Distinct os_user values from users.yaml. Self-sudo entries
             (matching service_user) and duplicates are dropped.
 
@@ -3575,7 +3575,7 @@ def _generate_sudoers(
     tee_path = shutil.which("tee") or "/usr/bin/tee"
 
     rules = textwrap.dedent(f"""\
-        # Kai - allow service user to read protected config files.
+        # Bjornheim AI - allow service user to read protected config files.
         # Managed by 'python -m kai install apply'. Do not edit manually.
         {service_user} ALL=(root) NOPASSWD: {cat_path} /etc/kai/env
         {service_user} ALL=(root) NOPASSWD: {cat_path} /etc/kai/services.yaml
@@ -3636,8 +3636,8 @@ def _generate_sudoers(
         # rationale as the claude_bin fix in PR #455.
         kill_bin = "/bin/kill"
         # CWD=* allows sudo's -D option on the pinned agent commands so
-        # the target OS user, rather than the Kai service user, enters a
-        # private protected workspace. Kai supplies only workspaces that
+        # the target OS user, rather than the Bjornheim AI service user, enters a
+        # private protected workspace. Bjornheim AI supplies only workspaces that
         # passed protected runtime policy validation. This does not expand
         # the practical authority of these rules: every allowed agent is
         # already an arbitrary-code execution boundary for <target>, as
@@ -3716,7 +3716,7 @@ def _generate_launcher_script(install_dir: str, webhook_port: int = 8080) -> str
     """
     return textwrap.dedent(f"""\
         #!/bin/bash
-        # Launcher script for Kai launchd service.
+        # Launcher script for Bjornheim AI launchd service.
         # Keeps bash as the tracked PID so launchd can manage the service
         # even when Homebrew Python re-execs through the framework bundle.
         #
@@ -3900,7 +3900,7 @@ def _generate_systemd_unit(install_dir: str, data_dir: str, service_user: str) -
     user_home = _user_home(service_user)
     return textwrap.dedent(f"""\
         [Unit]
-        Description=Kai Telegram Bot
+        Description=Bjornheim AI Telegram Bot
         After=network-online.target
         Wants=network-online.target
 
@@ -3922,7 +3922,7 @@ def _generate_systemd_unit(install_dir: str, data_dir: str, service_user: str) -
 
 def _stop_service(platform: str, dry_run: bool, **_kwargs: object) -> None:
     """
-    Stop the Kai service before applying changes.
+    Stop the Bjornheim AI service before applying changes.
 
     Best-effort: uses check=False since the service may not be running
     (first install) or may not exist yet. Failing to stop is not fatal.
@@ -3958,7 +3958,7 @@ def _stop_service(platform: str, dry_run: bool, **_kwargs: object) -> None:
 
 def _start_service(platform: str, dry_run: bool, **_kwargs: object) -> None:
     """
-    Start the Kai service after applying changes and verify it actually
+    Start the Bjornheim AI service after applying changes and verify it actually
     registered.
 
     The platform start commands (`launchctl bootstrap` on macOS,
@@ -4107,11 +4107,11 @@ def _secure_upload_directories(
 ) -> None:
     """Reconcile service-owned upload directories and historical uploads.
 
-    Kai writes Telegram uploads before handing their exact paths to an agent
+    Bjornheim AI writes Telegram uploads before handing their exact paths to an agent
     OS user.  The service therefore owns the shared upload root and each
     configured user's directory; the agent receives read access to individual
     files through the upload handoff ACL.  Older installs may instead have a
-    per-user directory owned by that agent user, which prevents Kai from
+    per-user directory owned by that agent user, which prevents Bjornheim AI from
     enforcing the traversal-only directory mode at upload time.
 
     Validate every managed tree before changing any of it. Historical files
@@ -4518,7 +4518,7 @@ def _migrate_managed_home_database_paths(
     dry_run: bool,
     validate_only: bool = False,
 ) -> None:
-    """Move Kai-held workspace references to canonical managed homes."""
+    """Move Bjornheim AI-held workspace references to canonical managed homes."""
     if not migrations:
         return
     db_path = data_path / "kai.db"
@@ -4647,7 +4647,9 @@ def _migrate_managed_home_database_paths(
         if not change_count or validate_only:
             return
         if dry_run:
-            print(f"[DRY RUN] Would migrate Kai database paths for {len(migrations)} canonical managed home(s)")
+            print(
+                f"[DRY RUN] Would migrate Bjornheim AI database paths for {len(migrations)} canonical managed home(s)"
+            )
             return
 
         connection.execute("BEGIN IMMEDIATE")
@@ -4682,7 +4684,7 @@ def _migrate_managed_home_database_paths(
                     (workspace_root, project_id),
                 )
         connection.commit()
-        print(f"  Migrated Kai database paths for {len(migrations)} canonical managed home(s)")
+        print(f"  Migrated Bjornheim AI database paths for {len(migrations)} canonical managed home(s)")
     except BaseException:
         connection.rollback()
         raise
@@ -5306,7 +5308,7 @@ def _apply_migrate(
             print(f"  Created {user_dir}")
 
     # -- Canonical per-user identity and backend-native adapters --
-    # AGENTS.md is the sole editable Kai-managed identity source. Claude's
+    # AGENTS.md is the sole editable Bjornheim AI-managed identity source. Claude's
     # native CLAUDE.md surface imports it; every other backend consumes
     # AGENTS.md directly. Existing customized CLAUDE.md content is migrated
     # losslessly before compatibility files are changed.
@@ -5572,7 +5574,7 @@ def _cmd_apply() -> None:
         del env["LLM_PROVIDER"]
     # WEBHOOK_SECRET no longer authenticates any runtime route. Never
     # redeploy it from an older install.conf. Refuse the upgrade before
-    # stopping Kai when either named replacement is absent; silently
+    # stopping Bjornheim AI when either named replacement is absent; silently
     # stripping the old credential would otherwise disable an endpoint
     # that the shared credential previously enabled.
     if str(env.get("WEBHOOK_SECRET", "")).strip():
@@ -7360,7 +7362,7 @@ def _apply_backend_registry(
             print(f"  - {warning}", file=sys.stderr)
         print(
             "  These commands remain supported for the trusted-host compatibility runtime, "
-            "but they do not provide hostile multi-user isolation. Isolated Kai Workspace "
+            "but they do not provide hostile multi-user isolation. Isolated Bjornheim AI Workspace "
             "workers are the planned boundary.",
             file=sys.stderr,
         )
@@ -7478,7 +7480,7 @@ def _apply_goose_config(
     # runtime dependencies.
     if not shutil.which("goose"):
         print("  WARNING: 'goose' binary not found on PATH.")
-        print("  Kai will fail to start the Goose backend until goose is installed.")
+        print("  Bjornheim AI will fail to start the Goose backend until goose is installed.")
         print("  See https://github.com/block/goose for installation instructions.")
 
     for home, uid, gid in targets:
@@ -7810,7 +7812,7 @@ def _check_traversal(path: Path, service_user: str) -> str | None:
 
 
 def _check_service_status(platform: str) -> str:
-    """Check if the Kai service is running on the current platform."""
+    """Check if the Bjornheim AI service is running on the current platform."""
     if platform == "darwin":
         # Check the system domain (LaunchDaemon, not per-user LaunchAgent)
         result = subprocess.run(
@@ -7863,7 +7865,7 @@ def _cmd_status() -> None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    print("Kai Installation Status")
+    print("Bjornheim AI Installation Status")
     print("=" * 30)
     print(_check_path(Path(install_dir), "Installation"))
     print(_check_path(Path(data_dir), "Data"))

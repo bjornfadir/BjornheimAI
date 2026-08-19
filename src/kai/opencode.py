@@ -25,11 +25,11 @@ Model selection flows through `OPENCODE_CONFIG_CONTENT`. The CLI does
 not accept `--model` on argv; the only argv flags are
 `--cwd`, `--port`, `--hostname`, `--log-level`, `--print-logs`,
 `--pure`, `--mdns`, `--mdns-domain`, `--cors`, `--help`, `--version`.
-OpenCode reads inline config from the env var at startup; Kai writes
+OpenCode reads inline config from the env var at startup; Bjornheim AI writes
 the active model into a one-shot JSON blob per process.
 
-Operator authentication is handled OUTSIDE Kai: `opencode auth login`
-writes credentials to `~/.local/share/opencode/auth.json`. The Kai
+Operator authentication is handled OUTSIDE Bjornheim AI: `opencode auth login`
+writes credentials to `~/.local/share/opencode/auth.json`. The Bjornheim AI
 installer prints a reminder; the wizard does not attempt to manage
 OpenCode auth state. On installs with per-user OS isolation
 (users.yaml `os_user`), the login must be run AS each target user so
@@ -293,7 +293,7 @@ class OpenCodeBackend(AcpBackend):
         adapter (e.g. operator running tests).
         """
         # OpenCode otherwise falls back to Claude instruction files when an
-        # AGENTS.md is absent. Kai's identity contract is explicit: OpenCode
+        # AGENTS.md is absent. Bjornheim AI's identity contract is explicit: OpenCode
         # receives AGENTS.md only.
         base_env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] = "1"
         if self.model:

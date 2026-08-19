@@ -303,7 +303,7 @@ class TestAtomicTerminalTransactions:
             assert result.execution.run.terminal_code == "authentication_expired"
             assert result.execution.attempt.status == RunAttemptStatus.FAILED
             assert [fragment.body for fragment in result.finalization.plan.fragments] == [
-                "Authentication for the configured agent has expired. Kai did not complete this request."
+                "Authentication for the configured agent has expired. Bjornheim AI did not complete this request."
             ]
             with pytest.raises(ValueError, match="TerminalFailureCode"):
                 await WorkshopRunTerminalTransactionCoordinator(authority).fail(

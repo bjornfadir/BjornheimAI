@@ -119,7 +119,7 @@ class TestGetUserModelsWarningSuppression:
     provider that should have a curated list (programming oversight).
     Codex AND opencode are intentionally excluded: both return None for
     legitimate reasons (codex curates separately; opencode model IDs
-    are open-ended provider/model strings whose set Kai cannot curate).
+    are open-ended provider/model strings whose set Bjornheim AI cannot curate).
     Pin the exclusion so a real missing-registry-entry warning is not
     drowned out by per-turn opencode noise.
     """
@@ -5325,7 +5325,7 @@ class TestNotifyIfQueued:
         update = _make_update()
         chat_id = 12345
 
-        # Acquire the lock to simulate Kai being busy
+        # Acquire the lock to simulate Bjornheim AI being busy
         from kai.locks import get_lock
 
         lock = get_lock(chat_id)
@@ -7520,7 +7520,7 @@ class TestHandleReviewCommand:
 
     @pytest.mark.asyncio
     async def test_explicit_repo_denied_when_only_another_user_is_authorized(self, tmp_path, monkeypatch):
-        """One user cannot spend Kai's GitHub authority granted to another."""
+        """One user cannot spend Bjornheim AI's GitHub authority granted to another."""
         monkeypatch.setattr("kai.bot.DATA_DIR", tmp_path)
         monkeypatch.setattr("kai.bot._REVIEW_TMP_DIR", tmp_path)
         update = _make_update(user_id=1)

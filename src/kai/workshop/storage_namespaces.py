@@ -97,11 +97,21 @@ class WorkshopChannelHistoryRegistry:
                 raise WorkshopStorageNamespaceError("Telegram channel history binding cannot use chat ID zero")
             namespaces.append(WorkshopChannelHistoryNamespace(channel_id, legacy_chat_id))
 
+        # A hybrid human's runtime profile legitimately spans two direct
+        # channels (Telegram + Discord - see WorkshopPrincipalStorageRegistry
+        # .from_store's docstring above for the full reasoning). Exactly one
+        # channel must still be picked as *the* legacy runtime_config_id
+        # alias target; prefer the Telegram-bound channel, since it is the
+        # pre-existing transport and so the one most likely to already have
+        # populated history on disk.
         async with store.connection.execute(
-            "SELECT runtime_profile_id, channel_id FROM channel_agent_runtime_assignments ORDER BY runtime_profile_id"
+            "SELECT cara.runtime_profile_id, cara.channel_id, cb.transport "
+            "FROM channel_agent_runtime_assignments cara "
+            "LEFT JOIN channel_bindings cb ON cb.channel_id = cara.channel_id "
+            "ORDER BY cara.runtime_profile_id"
         ) as cursor:
             assignment_rows = list(await cursor.fetchall())
-        channel_by_profile: dict[RuntimeProfileId, ChannelId] = {}
+        channels_by_profile: dict[RuntimeProfileId, dict[ChannelId, str | None]] = {}
         for row in assignment_rows:
             try:
                 profile_id = RuntimeProfileId(str(row[0]))
@@ -110,16 +120,20 @@ class WorkshopChannelHistoryRegistry:
                 raise WorkshopStorageNamespaceError(
                     "Runtime history assignment contains an invalid opaque identifier"
                 ) from exc
-            if profile_id in channel_by_profile and channel_by_profile[profile_id] != channel_id:
-                raise WorkshopStorageNamespaceError("Runtime profile maps to multiple history channels")
-            channel_by_profile[profile_id] = channel_id
+            channels_by_profile.setdefault(profile_id, {})[channel_id] = (
+                str(row[2]) if row[2] is not None else None
+            )
 
         runtime_aliases: dict[int, ChannelId] = {}
         namespace_channels = {namespace.channel_id for namespace in namespaces}
         for profile in runtime_profiles.profiles:
-            channel_id = channel_by_profile.get(profile.profile_id)
-            if channel_id is None:
+            channels = channels_by_profile.get(profile.profile_id, {})
+            if not channels:
                 raise WorkshopStorageNamespaceError("Protected runtime profile has no canonical history channel")
+            telegram_channels = sorted(
+                channel_id for channel_id, transport in channels.items() if transport == "telegram"
+            )
+            channel_id = telegram_channels[0] if telegram_channels else sorted(channels)[0]
             runtime_aliases[profile.runtime_config_id] = channel_id
             if channel_id not in namespace_channels:
                 namespaces.append(
@@ -202,18 +216,34 @@ class WorkshopPrincipalStorageRegistry:
         store: WorkshopEventStore,
         runtime_profiles: WorkshopRuntimeProfileRegistry,
     ) -> WorkshopPrincipalStorageRegistry:
-        """Resolve every protected runtime through canonical direct ownership."""
+        """Resolve every protected runtime through canonical direct ownership.
+
+        A hybrid human (both a Telegram and a Discord identity) owns two
+        direct channels that legitimately share one runtime_profile_id (see
+        main.py's _workshop_bootstrap_humans) - the shared backend
+        subprocess/workspace is one physical person's, even though each
+        transport gets its own principal_id. Exactly one principal_id must
+        still be picked to *name* that runtime's on-disk storage directories
+        (home/, memory/, preferences/ are keyed by principal_id, not by
+        runtime_profile_id or transport). Prefer the Telegram-bound
+        principal when one exists: it is the pre-existing transport, so its
+        principal_id is the one that may already own populated storage on
+        disk from before this person had a second transport. Falling back to
+        the lexicographically smallest principal_id keeps the choice
+        deterministic across restarts for any other multi-owner case.
+        """
         async with store.connection.execute(
-            "SELECT ra.runtime_profile_id, cm.principal_id "
+            "SELECT ra.runtime_profile_id, cm.principal_id, cb.transport "
             "FROM channel_agent_runtime_assignments ra "
             "JOIN channels c ON c.id = ra.channel_id AND c.kind = 'direct' "
             "JOIN channel_memberships cm ON cm.channel_id = c.id AND cm.role = 'owner' "
             "JOIN principals p ON p.id = cm.principal_id AND p.kind = 'human' "
+            "LEFT JOIN channel_bindings cb ON cb.channel_id = c.id "
             "ORDER BY ra.runtime_profile_id, cm.principal_id"
         ) as cursor:
             rows = list(await cursor.fetchall())
 
-        owners_by_profile: dict[RuntimeProfileId, set[PrincipalId]] = {}
+        owners_by_profile: dict[RuntimeProfileId, dict[PrincipalId, str | None]] = {}
         for row in rows:
             try:
                 runtime_profile_id = RuntimeProfileId(str(row[0]))
@@ -222,18 +252,24 @@ class WorkshopPrincipalStorageRegistry:
                 raise WorkshopStorageNamespaceError(
                     "Canonical storage ownership contains an invalid opaque identifier"
                 ) from exc
-            owners_by_profile.setdefault(runtime_profile_id, set()).add(principal_id)
+            owners_by_profile.setdefault(runtime_profile_id, {})[principal_id] = (
+                str(row[2]) if row[2] is not None else None
+            )
 
         namespaces: list[WorkshopPrincipalStorageNamespace] = []
         for profile in runtime_profiles.profiles:
-            owners = owners_by_profile.get(profile.profile_id, set())
-            if len(owners) != 1:
+            owners = owners_by_profile.get(profile.profile_id, {})
+            if not owners:
                 raise WorkshopStorageNamespaceError(
                     "Protected runtime profile must resolve to exactly one canonical human storage owner"
                 )
+            telegram_owners = sorted(
+                principal_id for principal_id, transport in owners.items() if transport == "telegram"
+            )
+            canonical_owner = telegram_owners[0] if telegram_owners else sorted(owners)[0]
             namespaces.append(
                 WorkshopPrincipalStorageNamespace(
-                    next(iter(owners)),
+                    canonical_owner,
                     profile.profile_id,
                     profile.runtime_config_id,
                 )

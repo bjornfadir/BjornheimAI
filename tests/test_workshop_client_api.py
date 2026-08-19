@@ -277,7 +277,7 @@ class TestWorkshopNavigationHTTPContract:
             }
             assert len(payload["workshops"]) == 1
             workshop = payload["workshops"][0]
-            assert workshop["name"] == "Kai Workshop"
+            assert workshop["name"] == "Bjornheim AI Workshop"
             assert workshop["role"] == "admin"
             assert [channel["kind"] for channel in workshop["channels"]] == [
                 "direct",
@@ -292,14 +292,14 @@ class TestWorkshopNavigationHTTPContract:
                 "agents": [
                     {
                         "agent_id": direct["agents"][0]["agent_id"],
-                        "name": "Kai",
+                        "name": "Bjornheim AI",
                     }
                 ],
                 "participants": [
                     {
                         "principal_id": direct["participants"][0]["principal_id"],
                         "kind": "agent",
-                        "display_name": "Kai",
+                        "display_name": "Bjornheim AI",
                     }
                 ],
                 "can_submit_commands": True,

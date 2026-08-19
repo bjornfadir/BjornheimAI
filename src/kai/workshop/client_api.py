@@ -74,7 +74,7 @@ class WorkshopClientCommandSubmitter(Protocol):
 class WorkshopEnrollmentRateLimiter:
     """Bound enrollment attempts by source and across the whole process.
 
-    Cloudflare Tunnel connects to Kai over loopback, so ``request.remote`` is
+    Cloudflare Tunnel connects to Bjornheim AI over loopback, so ``request.remote`` is
     normally the tunnel process. ``CF-Connecting-IP`` is used only as a
     rate-limit partition when it contains one valid address; it never grants
     identity or authorization. A global ceiling still applies when a local
@@ -786,7 +786,7 @@ async def _handle_command_submission(
         response = _error_response(
             status=503,
             code="execution_unavailable",
-            message="Kai cannot accept Workshop commands right now",
+            message="Bjornheim AI cannot accept Workshop commands right now",
         )
         response.headers["Retry-After"] = "2"
         return response

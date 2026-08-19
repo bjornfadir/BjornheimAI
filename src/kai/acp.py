@@ -784,7 +784,7 @@ class AcpBackend(AgentBackend):
         carry the `SETENV:` tag that authorizes the passthrough.
 
         Default mirrors claude.py's wrap: KAI_WEBHOOK_SECRET (the
-        per-session token the agent needs to call back into Kai's
+        per-session token the agent needs to call back into Bjornheim AI's
         webhook API) and TMPDIR (the per-os-user temp anchor set in
         `_ensure_started`; without preservation env_reset strips the
         anchor and the agent falls back to the shared /tmp).
@@ -801,7 +801,7 @@ class AcpBackend(AgentBackend):
         Return the params for the initialize JSON-RPC call.
 
         Default matches Goose's payload (protocolVersion=v1, clientInfo
-        identifying Kai). Concrete adapters override only if the harness
+        identifying Bjornheim AI). Concrete adapters override only if the harness
         requires a different shape.
         """
         return {
@@ -835,7 +835,7 @@ class AcpBackend(AgentBackend):
         Returns the text chunk when this notification carries assistant
         output that should reach the user; returns None for tool-call,
         agent-thought, or any other notification shape the harness emits
-        but Kai should not surface.
+        but Bjornheim AI should not surface.
         """
         raise NotImplementedError
 

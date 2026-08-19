@@ -554,7 +554,7 @@ def _render_codex_stdin(system_prompt: str, user_payload: str) -> str:
     Codex `exec` mode has no `--system-prompt` flag. The harness
     achieves the same effect by prepending the system text to stdin
     with a labeled boundary, then the user payload. Boundary tokens
-    use the same `make_boundary` helper Kai's other prompts use, so
+    use the same `make_boundary` helper Bjornheim AI's other prompts use, so
     injection-resistance is consistent across the codebase.
 
     An empty system_prompt produces no boundary block at all - the
@@ -704,9 +704,9 @@ async def _run_subprocess(
         # Neutral cwd: no AGENTS.md / CLAUDE.md discovery at startup.
         # Without this, claude --print would walk up from the harness's
         # cwd and pick up the operator's per-user
-        # home_workspace identity files (Kai's bot identity: voice
+        # home_workspace identity files (Bjornheim AI's bot identity: voice
         # rules, persona, scheduling API docs). The judge's evaluations
-        # would then be filtered through Kai's persona, and the generator
+        # would then be filtered through Bjornheim AI's persona, and the generator
         # would receive bot-voice priming; both confounds the spec
         # explicitly rules out. Reuses the extractor's neutral cwd rather
         # than introducing a sibling so the two stay aligned.
@@ -1774,7 +1774,7 @@ def _capture_agent_cli_version(backend: str) -> tuple[str, str]:
     Used to detect cross-run drift in the residual default context the
     CLI injects. A CLI upgrade between runs that changes that default
     is the most likely cause of a swing in win-rate that does not
-    correspond to any code change in Kai or in the probe set.
+    correspond to any code change in Bjornheim AI or in the probe set.
 
     Both branches honor their binary override (`CLAUDE_BIN` /
     `CODEX_BIN`). Recording the version of the PATH binary when the

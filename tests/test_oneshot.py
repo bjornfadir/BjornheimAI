@@ -3077,7 +3077,7 @@ class TestGooseOneShotReasonerArgvAndEnv:
 
     @pytest.mark.asyncio
     async def test_argv_shape_with_provider_translation(self, tmp_path):
-        """The full `goose run` argv, with the Kai provider key
+        """The full `goose run` argv, with the Bjornheim AI provider key
         translated to goose's wire name (deepseek is custom_deepseek
         on the goose side) and the registry model untranslated."""
         reasoner = GooseOneShotReasoner(cwd=tmp_path, os_user=_current_user(), provider="deepseek")

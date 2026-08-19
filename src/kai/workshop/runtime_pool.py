@@ -1,4 +1,4 @@
-"""Protected runtime-profile facade over Kai's compatibility subprocess pool."""
+"""Protected runtime-profile facade over Bjornheim AI's compatibility subprocess pool."""
 
 from __future__ import annotations
 

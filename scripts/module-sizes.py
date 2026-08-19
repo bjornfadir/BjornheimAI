@@ -2,7 +2,7 @@
 """Report large Python modules by physical line count.
 
 This is a lightweight maintainability guardrail for trust-boundary review.
-It intentionally reports by default instead of failing: Kai currently has
+It intentionally reports by default instead of failing: Bjornheim AI currently has
 known oversized modules, and the immediate goal is a stable decomposition
 baseline rather than blocking unrelated security fixes.
 """

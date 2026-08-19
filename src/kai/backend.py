@@ -10,7 +10,7 @@ Provides:
 
 The ABC defines the minimal surface that SubprocessPool needs. Concrete
 backends (ClaudeCodeBackend, future GooseBackend, etc.) implement the
-process management; the context functions here handle the Kai-specific
+process management; the context functions here handle the Bjornheim AI-specific
 prompt assembly that is identical across all backends.
 """
 
@@ -306,11 +306,16 @@ class StreamEvent:
         text_so_far: Accumulated response text up to this point.
         done: True if this is the final event (response complete or error).
         response: The complete AgentResponse, set only when done=True.
+        activity: Short human-readable label for tool activity (e.g. a web
+            search or file read) happening between text chunks. Never part
+            of text_so_far or the final response text -- purely a live
+            progress hint for the transport layer.
     """
 
     text_so_far: str
     done: bool = False
     response: AgentResponse | None = None
+    activity: str | None = None
 
 
 # ── API context ─────────────────────────────────────────────────────
@@ -472,7 +477,7 @@ def build_session_context(
 
     Args:
         workspace: The backend's current working directory.
-        home_workspace: Kai's home workspace (identity + memory source).
+        home_workspace: Bjornheim AI's home workspace (identity + memory source).
         api: Webhook port, secret, and services info.
         workspace_config: Per-workspace config (for system_prompt).
         chat_id: Telegram chat ID for history scoping and API routing.
@@ -495,7 +500,7 @@ def build_session_context(
     """
     parts: list[str] = []
 
-    # When in a foreign workspace, inject Kai's identity from home.
+    # When in a foreign workspace, inject Bjornheim AI's identity from home.
     # try/except guards against race (file deleted between exists()
     # and read_text()) and permission errors, matching the pattern
     # in get_workspace_system_prompt().
@@ -587,7 +592,7 @@ def build_session_context(
                 # MEMORY.md branch's wording for symmetry.
                 parts.append(f"[Your personal preferences (file: {pref_path}):]\n(not yet created)")
 
-    # Inject Kai's personal memory from DATA_DIR ONLY in disabled mode.
+    # Inject Bjornheim AI's personal memory from DATA_DIR ONLY in disabled mode.
     # In enabled mode, Qdrant is the active fact surface (retrieved via
     # memory.format_context in claude.py), and MEMORY.md is dormant;
     # injecting it would create a dual-source collision where retrieval
@@ -713,7 +718,7 @@ def build_session_context(
             f"http://localhost:{api.webhook_port}/api/send-file "
             f"with header 'X-Webhook-Secret: $KAI_WEBHOOK_SECRET' (environment variable). "
             f'Required: "path" (absolute file path within the current workspace {workspace} '
-            f"or an exact incoming-file path previously supplied by Kai). "
+            f"or an exact incoming-file path previously supplied by Bjornheim AI). "
             f'Optional: "caption". Images are sent as photos, '
             f"everything else as documents.\n"
             f"Incoming files from the user are auto-saved and their exact paths "
@@ -993,15 +998,15 @@ def _ensure_development_identity_files(home: Path, backend_name: str) -> None:
     template = PROJECT_ROOT / "templates" / "AGENTS.md"
 
     if claude_dir.is_symlink():
-        raise RuntimeError(f"Refusing symlinked Kai identity directory: {claude_dir}")
+        raise RuntimeError(f"Refusing symlinked Bjornheim AI identity directory: {claude_dir}")
     if claude_dir.exists() and not claude_dir.is_dir():
-        raise RuntimeError(f"Kai Claude identity path is not a directory: {claude_dir}")
+        raise RuntimeError(f"Bjornheim AI Claude identity path is not a directory: {claude_dir}")
     if agents_dst.is_symlink() or claude_dst.is_symlink():
-        raise RuntimeError(f"Refusing symlinked Kai identity surface under {home}")
+        raise RuntimeError(f"Refusing symlinked Bjornheim AI identity surface under {home}")
     if agents_dst.exists() and not agents_dst.is_file():
-        raise RuntimeError(f"Kai identity path is not a regular file: {agents_dst}")
+        raise RuntimeError(f"Bjornheim AI identity path is not a regular file: {agents_dst}")
     if claude_dst.exists() and not claude_dst.is_file():
-        raise RuntimeError(f"Kai Claude adapter path is not a regular file: {claude_dst}")
+        raise RuntimeError(f"Bjornheim AI Claude adapter path is not a regular file: {claude_dst}")
 
     claude_content = claude_dst.read_text() if claude_dst.is_file() else None
     if not agents_dst.exists():
@@ -1256,7 +1261,7 @@ def resolve_home_workspace(
             )
         return path
 
-    # Development / single-user path: use the per-user Kai-managed directory
+    # Development / single-user path: use the per-user Bjornheim AI-managed directory
     # under data_dir. The effective backend selects the native identity surface
     # without assigning priority to any backend.
     backend_name, _provider = get_user_backend_and_provider(user, config)
@@ -1333,7 +1338,7 @@ def extract_text_query(prompt: str | list) -> str:
     AGENTS.md, MEMORY.md, history, and API docs reach ~10-20KB; if any
     of that ends up in the embedding query, the first message's memory
     retrieval is essentially random and the user-visible behavior is
-    "Kai never remembers anything on the first turn of a new session."
+    "Bjornheim AI never remembers anything on the first turn of a new session."
 
     For string prompts the raw text is the prompt itself. For list
     prompts (mixed-modal content blocks), return the first text block's

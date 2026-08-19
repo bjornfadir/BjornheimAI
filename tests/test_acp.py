@@ -330,7 +330,7 @@ class TestHookSurface:
             b.extract_text_delta({})
 
     def test_default_initialize_params_match_kai_shape(self):
-        """The default initialize params carry Kai's clientInfo."""
+        """The default initialize params carry Bjornheim AI's clientInfo."""
         b = _make_fake()
         params = b.build_initialize_params()
         assert params["protocolVersion"] == "v1"

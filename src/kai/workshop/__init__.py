@@ -1,4 +1,4 @@
-"""Transport-independent Kai Workshop domain and persistence foundations.
+"""Transport-independent Bjornheim AI Workshop domain and persistence foundations.
 
 The current production service seeds this state and shadow-records accepted
 inbound text, successful assistant results, and delivery observations. Existing

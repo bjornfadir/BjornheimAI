@@ -1,9 +1,9 @@
 """Protected-install OS-user isolation validation.
 
-The protected deployment runs the outer Kai daemon as a dedicated service
+The protected deployment runs the outer Bjornheim AI daemon as a dedicated service
 account and persistent conversational agents as per-user OS accounts.  Keeping
 those identities distinct is a security boundary: the service account has
-exact sudo permissions for protected Kai configuration that an agent must not
+exact sudo permissions for protected Bjornheim AI configuration that an agent must not
 inherit.
 
 Single-user repo deployments intentionally do not use this validator.  In that

@@ -1,4 +1,4 @@
-# Reviewed install constraints for Kai's protected install.
+# Reviewed install constraints for Bjornheim AI's protected install.
 #
 # The protected installer copies this file into /opt/kai and passes it to
 # `pip install --constraint` when installing `.[memory,totp,tts]`.

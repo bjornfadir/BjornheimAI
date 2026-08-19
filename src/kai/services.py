@@ -8,7 +8,7 @@ Provides functionality to:
 4. Proxy HTTP calls to external APIs on behalf of the inner Claude process
 
 Services are defined as inert data — URL, method, auth type, headers. No code
-execution, no plugins, no middleware. Kai's own process makes the HTTP call
+execution, no plugins, no middleware. Bjornheim AI's own process makes the HTTP call
 directly and returns the result. API keys live in .env and are never exposed
 to the inner Claude process or included in conversation context.
 

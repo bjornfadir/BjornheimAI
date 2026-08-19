@@ -624,8 +624,8 @@ class TestSubprocessExplicitCwd:
 
     Without an explicit cwd, claude --print walks up from the harness's
     cwd and picks up the per-user home_workspace/.claude/CLAUDE.md
-    (Kai's bot identity: voice rules, persona, scheduling API docs).
-    The judge would then filter every verdict through Kai's persona,
+    (Bjornheim AI's bot identity: voice rules, persona, scheduling API docs).
+    The judge would then filter every verdict through Bjornheim AI's persona,
     and the generator would receive bot-voice priming. Both confound
     the spec's minimal-prompt measurement. This test locks the parameter
     plumbing so a future refactor cannot quietly drop the cwd= argument.

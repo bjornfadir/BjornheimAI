@@ -436,7 +436,7 @@ class TestBuildSessionContext:
             )
 
         assert result is not None
-        assert "an exact incoming-file path previously supplied by Kai" in result
+        assert "an exact incoming-file path previously supplied by Bjornheim AI" in result
         assert f"{data_dir}/files/123/" not in result
 
     def test_services_included(self, tmp_path):
@@ -829,14 +829,14 @@ class TestEnsureUserHome:
     def test_claude_seeds_canonical_identity_and_adapter(self, tmp_path):
         fake_root = tmp_path / "src_root"
         (fake_root / "templates").mkdir(parents=True)
-        (fake_root / "templates" / "AGENTS.md").write_text("# Kai template\n")
+        (fake_root / "templates" / "AGENTS.md").write_text("# Bjornheim AI template\n")
 
         with patch("kai.backend.PROJECT_ROOT", fake_root):
             home = ensure_user_home(99, tmp_path / "data", backend_name="claude")
 
         agents_dst = home / "AGENTS.md"
         claude_dst = home / ".claude" / "CLAUDE.md"
-        assert agents_dst.read_text() == "# Kai template\n"
+        assert agents_dst.read_text() == "# Bjornheim AI template\n"
         assert claude_dst.read_text() == "@../AGENTS.md\n"
         assert stat.S_IMODE(agents_dst.stat().st_mode) == 0o600
         assert stat.S_IMODE(claude_dst.stat().st_mode) == 0o600
@@ -845,12 +845,12 @@ class TestEnsureUserHome:
     def test_non_claude_backend_seeds_only_agents_md(self, tmp_path, backend_name):
         fake_root = tmp_path / "src_root"
         (fake_root / "templates").mkdir(parents=True)
-        (fake_root / "templates" / "AGENTS.md").write_text("# Kai template\n")
+        (fake_root / "templates" / "AGENTS.md").write_text("# Bjornheim AI template\n")
 
         with patch("kai.backend.PROJECT_ROOT", fake_root):
             home = ensure_user_home(99, tmp_path / "data", backend_name=backend_name)
 
-        assert (home / "AGENTS.md").read_text() == "# Kai template\n"
+        assert (home / "AGENTS.md").read_text() == "# Bjornheim AI template\n"
         assert not (home / ".claude" / "CLAUDE.md").exists()
 
     def test_existing_claude_identity_migrates_without_content_loss(self, tmp_path):
@@ -940,7 +940,7 @@ class TestEnsureUserHome:
         # not hit the patched failure.
         fake_root = tmp_path / "src_root"
         (fake_root / "templates").mkdir(parents=True)
-        (fake_root / "templates" / "AGENTS.md").write_text("# Kai\n")
+        (fake_root / "templates" / "AGENTS.md").write_text("# Bjornheim AI\n")
 
         def boom(*_args, **_kwargs) -> None:
             raise OSError("simulated permission denied")
@@ -1224,6 +1224,8 @@ class TestDataTypes:
             "Error: no credentials configured for provider anthropic": AgentFailureKind.AUTHENTICATION_REQUIRED,
             "Provider unavailable while starting opencode": AgentFailureKind.PROVIDER_UNAVAILABLE,
             "You have no credits remaining. Add credits to continue using the API": AgentFailureKind.QUOTA_EXHAUSTED,
+            "Claude timed out": AgentFailureKind.TIMEOUT,
+            "Claude interaction timed out (no output)": AgentFailureKind.TIMEOUT,
         }
 
         for error, expected in cases.items():

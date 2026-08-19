@@ -116,17 +116,33 @@ async def _resolve_telegram_target(
         and isinstance(row[7], str)
         and bool(row[7])
     )
+    # A message from any other authenticated transport (currently: Discord)
+    # is a legitimate target with no Telegram finalization to resolve - it
+    # has its own delivery path entirely outside this Telegram-specific
+    # module (see discord_bot.py's own streaming/reply handling). Only the
+    # non-strict finalization lookup (require_binding=False, used by every
+    # completed turn regardless of transport) may return None for this;
+    # the strict streaming-preview bind path is Telegram-only in practice
+    # (its only caller is bot.py) and keeps raising for anything unexpected.
+    valid_other_transport = (
+        not require_binding
+        and row is not None
+        and row[5] is not None
+        and row[5] not in ("telegram", "workshop_client")
+    )
     if (
         row is None
         or row[2] != "direct"
         or row[3] != "human"
         or row[4] is not None
-        or not (valid_telegram or valid_workshop_client)
+        or not (valid_telegram or valid_workshop_client or valid_other_transport)
     ):
         expected = "Telegram or Workshop client" if allow_workshop_client else "Telegram inbound"
         raise StreamingPreviewTargetError(
             f"Target must be an existing {expected} message from a human in a direct channel"
         )
+    if valid_other_transport:
+        return None
 
     channel_id = ChannelId(str(row[1]))
     async with store.connection.execute(

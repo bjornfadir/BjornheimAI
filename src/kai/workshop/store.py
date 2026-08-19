@@ -1,4 +1,4 @@
-"""SQLite event-store and projection contracts for Kai Workshop."""
+"""SQLite event-store and projection contracts for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 
@@ -99,14 +99,14 @@ class WorkshopEventStore:
 
     @classmethod
     async def attach(cls, connection: aiosqlite.Connection) -> WorkshopEventStore:
-        """Attach to an existing Kai connection without taking ownership."""
+        """Attach to an existing Bjornheim AI connection without taking ownership."""
         connection.row_factory = aiosqlite.Row
         await migrate_workshop_schema(connection)
         return cls(connection, owns_connection=False)
 
     @classmethod
     def from_initialized_connection(cls, connection: aiosqlite.Connection) -> WorkshopEventStore:
-        """Use a connection whose Workshop schema was initialized by Kai startup."""
+        """Use a connection whose Workshop schema was initialized by Bjornheim AI startup."""
         return cls(connection, owns_connection=False)
 
     @property

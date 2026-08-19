@@ -1296,8 +1296,10 @@ class TestSendLockedBasic:
         assert "\n\n" in last_text
 
     @pytest.mark.asyncio
-    async def test_non_text_content_blocks_ignored(self):
-        """Content blocks that aren't type=text are skipped."""
+    async def test_tool_use_blocks_surfaced_as_activity_not_text(self):
+        """tool_use blocks yield an activity-only StreamEvent (a live progress
+        hint) rather than being silently dropped, but never pollute the
+        accumulated response text."""
         proc = _make_mock_proc(
             [
                 _system_event(),
@@ -1323,8 +1325,15 @@ class TestSendLockedBasic:
         events = await _collect_events(claude)
 
         text_events = [e for e in events if not e.done]
-        assert len(text_events) == 1
-        assert text_events[0].text_so_far == "Result"
+        assert len(text_events) == 2
+        activity_event, text_event = text_events
+        assert activity_event.text_so_far == ""
+        assert activity_event.activity
+        assert text_event.text_so_far == "Result"
+        assert text_event.activity is None
+
+        done_event = next(e for e in events if e.done)
+        assert done_event.response.text == "Result"
 
     @pytest.mark.asyncio
     async def test_non_json_lines_skipped(self):
@@ -1447,19 +1456,21 @@ class TestSendLockedErrors:
 
         # Control time progression in kai.claude without affecting asyncio.
         # The streaming loop calls time.monotonic() in a fixed pattern:
-        #   1. Init: last_activity = time.monotonic()
-        #   2. Idle check (iter 1): time.monotonic() - last_activity
-        #   3. Reset after readline 1: last_activity = time.monotonic()
-        #   4. Idle check (iter 2): time.monotonic() - last_activity
-        #   5. Reset after readline 2: last_activity = time.monotonic()
-        #   6. Idle check (iter 3): time.monotonic() - last_activity <- jump here
-        # Calls 1-5 return small values; call 6+ returns 100.0 so the
-        # idle check sees (100.0 - 0.5) > 5s and fires.
+        #   1. Start timing the prompt write+drain (once, before the loop)
+        #   2. Finish timing the write+drain (once, before the loop)
+        #   3. Init: last_activity = time.monotonic()
+        #   4. Idle check (iter 1), also timestamps readline start
+        #   5. Reset after readline 1: last_activity = time.monotonic()
+        #   6. Idle check (iter 2), also timestamps readline start
+        #   7. Reset after readline 2: last_activity = time.monotonic()
+        #   8. Idle check (iter 3): time.monotonic() - last_activity <- jump here
+        # Calls 1-7 return small values; call 8+ returns 100.0 so the
+        # idle check sees (100.0 - 0.7) > 5s and fires.
         mono_call = [0]
 
         def fake_monotonic():
             mono_call[0] += 1
-            if mono_call[0] <= 5:
+            if mono_call[0] <= 7:
                 return mono_call[0] * 0.1
             return 100.0
 
@@ -1618,6 +1629,29 @@ class TestSendLockedResult:
         assert done.response.error == "Something went wrong"
 
     @pytest.mark.asyncio
+    async def test_is_error_result_is_logged(self, caplog):
+        """A CLI-reported is_error=true result (e.g. a server-side API
+        error) produces no exception and no process crash -- previously
+        this fell through to classify_agent_failure with zero logging
+        anywhere, indistinguishable from a silent external hang."""
+        proc = _make_mock_proc(
+            [
+                _system_event(),
+                _result_event(text="Something went wrong", is_error=True),
+                b"",
+            ]
+        )
+        claude = _make_claude()
+        claude._proc = proc
+        claude._fresh_session = False
+
+        with caplog.at_level("WARNING", logger="kai.claude"):
+            await _collect_events(claude)
+
+        assert "is_error=true" in caplog.text
+        assert "Something went wrong" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_accumulated_text_preferred_over_result(self):
         """When text has been accumulated, it's used instead of result event text."""
         proc = _make_mock_proc(
@@ -1672,7 +1706,7 @@ class TestContextInjection:
         """Create a home workspace with identity file and DATA_DIR memory."""
         home = tmp_path / "home"
         home.mkdir(parents=True)
-        (home / "AGENTS.md").write_text("You are Kai.")
+        (home / "AGENTS.md").write_text("You are Bjornheim AI.")
 
         # Personal memory now lives under DATA_DIR, not the workspace
         data_dir = tmp_path / "data"
@@ -1754,7 +1788,7 @@ class TestContextInjection:
 
         prompt = self._extract_prompt(proc)
         # Identity from home workspace should be injected
-        assert "You are Kai" in prompt
+        assert "You are Bjornheim AI" in prompt
         # Foreign workspace memory should NOT be injected (Claude Code reads
         # it natively from cwd; bot-side reads risk PermissionError on Linux)
         assert "Foreign workspace memory" not in prompt
@@ -1962,7 +1996,7 @@ class TestContextInjection:
         # All three other context blocks fired and are present.
         assert memory_block in prompt
         assert "Respond ONLY" in prompt  # foreign-workspace reminder
-        assert "You are Kai" in prompt  # session_ctx (identity)
+        assert "You are Bjornheim AI" in prompt  # session_ctx (identity)
 
         marker_idx = prompt.index(USER_MESSAGE_MARKER)
 
@@ -1970,7 +2004,7 @@ class TestContextInjection:
         # top-to-bottom. Every other block must have a smaller index.
         assert prompt.index(memory_block) < marker_idx
         assert prompt.index("Respond ONLY") < marker_idx
-        assert prompt.index("You are Kai") < marker_idx
+        assert prompt.index("You are Bjornheim AI") < marker_idx
 
         # (c) User's actual text immediately follows the marker, with
         # nothing but whitespace between them. We compute the substring

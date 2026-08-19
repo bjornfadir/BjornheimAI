@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-WORKSHOP_SCHEMA_VERSION = 19
+WORKSHOP_SCHEMA_VERSION = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -931,6 +931,48 @@ _NOTIFICATION_DELIVERY_PURPOSE_SCHEMA = SchemaMigration(
     ),
 )
 
+_MULTI_TRANSPORT_RUNTIME_PROFILE_SCHEMA = SchemaMigration(
+    version=20,
+    name="multi_transport_runtime_profile_sharing",
+    statements=(
+        # v18 assumed one channel per runtime profile (UNIQUE(runtime_profile_id)),
+        # true when every human had exactly one client channel. A hybrid human
+        # (e.g. both a Telegram and a Discord identity) now legitimately shares
+        # one runtime_profile_id across their own two channels - same backend
+        # subprocess/workspace identity either way (see main.py's
+        # _workshop_bootstrap_humans). Cross-human profile reuse is unaffected:
+        # that protection has always been enforced at the application level in
+        # WorkshopRuntimeAssignmentService._ensure_profile_unassigned (an
+        # explicit query, not this constraint), so dropping this table-level
+        # UNIQUE does not weaken any actual authority boundary. SQLite cannot
+        # drop a table constraint in place - rebuild the table.
+        """
+        CREATE TABLE channel_agent_runtime_assignments_v20 (
+            id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            runtime_profile_id TEXT NOT NULL CHECK (
+                length(runtime_profile_id) BETWEEN 1 AND 128
+            ),
+            created_at TEXT NOT NULL,
+            created_event_position INTEGER NOT NULL UNIQUE
+                REFERENCES event_log(position) ON DELETE RESTRICT,
+            UNIQUE (channel_id, agent_id)
+        )
+        """,
+        """
+        INSERT INTO channel_agent_runtime_assignments_v20 (
+            id, channel_id, agent_id, runtime_profile_id, created_at, created_event_position
+        ) SELECT
+            id, channel_id, agent_id, runtime_profile_id, created_at, created_event_position
+        FROM channel_agent_runtime_assignments
+        """,
+        "DROP TABLE channel_agent_runtime_assignments",
+        "ALTER TABLE channel_agent_runtime_assignments_v20 RENAME TO channel_agent_runtime_assignments",
+        "CREATE INDEX channel_agent_runtime_profile_idx ON channel_agent_runtime_assignments (runtime_profile_id)",
+    ),
+)
+
 _MIGRATIONS = (
     _INITIAL_SCHEMA,
     _DELIVERY_SCHEMA,
@@ -951,6 +993,7 @@ _MIGRATIONS = (
     _CLIENT_SECURITY_STATE_ISOLATION_SCHEMA,
     _RUNTIME_ASSIGNMENT_SCHEMA,
     _NOTIFICATION_DELIVERY_PURPOSE_SCHEMA,
+    _MULTI_TRANSPORT_RUNTIME_PROFILE_SCHEMA,
 )
 
 
@@ -978,7 +1021,7 @@ async def migrate_workshop_schema(
             applied = {int(row[0]) for row in await cursor.fetchall()}
         unknown = {version for version in applied if version > WORKSHOP_SCHEMA_VERSION}
         if unknown:
-            raise RuntimeError(f"Workshop schema is newer than this Kai build: {sorted(unknown)}")
+            raise RuntimeError(f"Workshop schema is newer than this Bjornheim AI build: {sorted(unknown)}")
 
         for migration in _MIGRATIONS:
             if migration.version in applied:

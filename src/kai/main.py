@@ -1,5 +1,5 @@
 """
-Application entry point for the Kai core host and configured adapters.
+Application entry point for the Bjornheim AI core host and configured adapters.
 
 Provides functionality to:
 1. Configure logging with daily rotation and terminal output
@@ -12,8 +12,8 @@ Provides functionality to:
 8. Clean up all resources in the correct order on exit
 
 When Telegram is enabled, transport mode is determined by TELEGRAM_WEBHOOK_URL:
-    - Set: webhook mode (Telegram POSTs updates to Kai's HTTP server)
-    - Unset: polling mode (Kai pulls updates from Telegram's servers)
+    - Set: webhook mode (Telegram POSTs updates to Bjornheim AI's HTTP server)
+    - Unset: polling mode (Bjornheim AI pulls updates from Telegram's servers)
 
 The startup sequence is:
     1. Load config from .env
@@ -44,6 +44,7 @@ from kai import services, sessions
 from kai.application_host import KaiApplicationHost
 from kai.backend_registry import load_backend_registry
 from kai.config import DATA_DIR, PROJECT_ROOT, _read_protected_file, load_config
+from kai.discord_adapter import DiscordAdapter
 from kai.http_adapter import HttpAdapter
 from kai.telegram_adapter import TelegramAdapter
 from kai.workshop.bootstrap import BootstrapHuman, BootstrapNotificationChannel
@@ -68,24 +69,48 @@ def _workshop_bootstrap_humans(
     config,
     runtime_profiles: WorkshopRuntimeProfileRegistry,
 ) -> tuple[BootstrapHuman, ...]:
-    """Map authorized humans to their interactive direct-channel bindings."""
-    return tuple(
-        BootstrapHuman(
-            display_name=user.name,
-            role="admin" if user.role == "admin" else "member",
-            transport="telegram",
-            external_subject=str(user.telegram_id),
-            external_channel_id=str(user.telegram_id),
-            runtime_profile_id=runtime_profiles.for_config_id(user.telegram_id).profile_id,
-        )
-        for user in sorted(config.user_configs.values(), key=lambda user: user.telegram_id)
-    )
+    """Map authorized humans to their interactive direct-channel bindings.
+
+    A hybrid user (both telegram_id and discord_id set) gets one
+    BootstrapHuman per transport - separate principals/channels/history per
+    transport, matching every other user - but both entries share the same
+    runtime_profile_id (config_id-derived), since it's the same person's
+    backend subprocess/workspace identity either way.
+    """
+    humans: list[BootstrapHuman] = []
+    for user in sorted(config.user_configs.values(), key=lambda user: user.config_id):
+        role = "admin" if user.role == "admin" else "member"
+        runtime_profile_id = runtime_profiles.for_config_id(user.config_id).profile_id
+        if user.telegram_id is not None:
+            humans.append(
+                BootstrapHuman(
+                    display_name=user.name,
+                    role=role,
+                    transport="telegram",
+                    external_subject=str(user.telegram_id),
+                    external_channel_id=str(user.telegram_id),
+                    runtime_profile_id=runtime_profile_id,
+                )
+            )
+        if user.discord_id is not None:
+            humans.append(
+                BootstrapHuman(
+                    display_name=user.name,
+                    role=role,
+                    transport="discord",
+                    external_subject=str(user.discord_id),
+                    external_channel_id=str(user.discord_id),
+                    runtime_profile_id=runtime_profile_id,
+                )
+            )
+    return tuple(humans)
 
 
 async def _workshop_bootstrap_notification_channels(config) -> tuple[BootstrapNotificationChannel, ...]:
     """Map effective Telegram group destinations without changing live routing."""
     members_by_group: dict[int, set[str]] = {}
-    for user in sorted(config.user_configs.values(), key=lambda item: item.telegram_id):
+    telegram_users = [u for u in config.user_configs.values() if u.telegram_id is not None]
+    for user in sorted(telegram_users, key=lambda item: item.telegram_id):
         effective = await sessions.resolve_github_settings(user.telegram_id, config)
         destination = effective["notify_chat_id"]
         if destination >= 0:
@@ -250,7 +275,7 @@ async def _file_cleanup_loop(retention_days: int) -> None:
 
 def main() -> None:
     """
-    Top-level entry point for the Kai bot.
+    Top-level entry point for the Bjornheim AI bot.
 
     Sets up logging, then delegates the entire startup and run
     lifecycle to `_start` under a single SystemExit choke point: the
@@ -285,7 +310,7 @@ def _start() -> None:
     into the main log.
     """
     config = load_config()
-    logging.info("Kai starting (model=%s, users=%s)", config.default_model, config.allowed_user_ids)
+    logging.info("Bjornheim AI starting (model=%s, users=%s)", config.default_model, config.allowed_user_ids)
 
     # Load external service definitions. In a protected installation, services.yaml
     # lives in /etc/kai/ (root-owned). Falls back to PROJECT_ROOT for development.
@@ -357,18 +382,22 @@ def _start() -> None:
 
         core_host: KaiApplicationHost | None = None
         telegram_adapter: TelegramAdapter | None = None
+        discord_adapter: DiscordAdapter | None = None
         cleanup_task: asyncio.Task[None] | None = None
 
         # Determine the default compatibility user (admin or first user) for
         # legacy per-user migrations. Workshop-only installations may have no
         # users.yaml entries, in which case these migrations are unnecessary.
-        admins = config.get_admins()
-        if admins:
-            default_chat_id: int | None = admins[0].telegram_id
-        elif config.user_configs:
-            default_chat_id = next(iter(config.user_configs))
+        # This migration path is Telegram-chat_id-keyed legacy compatibility
+        # data (see kai.sessions/kai.history); a Discord-only admin has no
+        # such legacy row to migrate, so only Telegram-registered admins are
+        # eligible here even though config.get_admins() may return others.
+        telegram_admins = [a for a in config.get_admins() if a.telegram_id is not None]
+        if telegram_admins:
+            default_chat_id: int | None = telegram_admins[0].telegram_id
         else:
-            default_chat_id = None
+            telegram_users = [u.telegram_id for u in config.user_configs.values() if u.telegram_id is not None]
+            default_chat_id = telegram_users[0] if telegram_users else None
 
         # One-time migration: rename global "workspace" setting to
         # "workspace:{chat_id}" for per-user namespacing (Phase 2).
@@ -412,9 +441,10 @@ def _start() -> None:
                 principal_storage=principal_storage,
                 services_info=services.get_available_services(),
                 registered_backend_ids=_workshop_registered_backend_ids(config),
+                workshop_id=workshop_bootstrap.workshop_id,
             )
             core_services = await core_host.start()
-            logging.info("Kai core application host is ready")
+            logging.info("Bjornheim AI core application host is ready")
 
             if config.telegram_enabled:
                 telegram_adapter = TelegramAdapter(
@@ -423,6 +453,10 @@ def _start() -> None:
                     use_webhook=use_webhook,
                 )
                 await core_host.attach_adapter("telegram", telegram_adapter)
+
+            if config.discord_enabled:
+                discord_adapter = DiscordAdapter(config, core_services)
+                await core_host.attach_adapter("discord", discord_adapter)
 
             http_adapter = HttpAdapter(
                 config,
@@ -482,7 +516,7 @@ def _start() -> None:
                     logging.exception("Failed to process old .responding_to flag")
                     old_flag.unlink(missing_ok=True)
 
-            logging.info("Kai is running. Press Ctrl+C to stop.")
+            logging.info("Bjornheim AI is running. Press Ctrl+C to stop.")
             await core_host.wait()
         finally:
             # Shutdown in reverse order of startup
@@ -490,7 +524,7 @@ def _start() -> None:
                 try:
                     await core_host.stop()
                 except Exception:
-                    logging.exception("Kai core application host stopped with an error")
+                    logging.exception("Bjornheim AI core application host stopped with an error")
             if cleanup_task is not None:
                 cleanup_task.cancel()
                 await asyncio.gather(cleanup_task, return_exceptions=True)
@@ -499,9 +533,9 @@ def _start() -> None:
     try:
         asyncio.run(_init_and_run())
     except KeyboardInterrupt:
-        logging.info("Kai stopped.")
+        logging.info("Bjornheim AI stopped.")
     except Exception as exc:
-        logging.exception("Kai crashed")
+        logging.exception("Bjornheim AI crashed")
         raise SystemExit(1) from exc
 
 

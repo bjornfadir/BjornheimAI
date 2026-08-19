@@ -126,7 +126,7 @@ async def register_webhook(
     webhook_secret: str,
 ) -> int:
     """
-    Register a Kai webhook on owner/repo.
+    Register a Bjornheim AI webhook on owner/repo.
 
     Creates a webhook that sends JSON payloads for push, PR, issue, and
     review events. The secret is used by webhook.py to verify incoming

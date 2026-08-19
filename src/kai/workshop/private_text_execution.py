@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +26,11 @@ from kai.workshop.run_lifecycle import WorkshopRunLifecycle
 from kai.workshop.runtime_pool import WorkshopRuntimePool
 from kai.workshop.store import WorkshopEventStore
 
+log = logging.getLogger(__name__)
+
 _RECOVERY_INTERVAL_SECONDS = 5.0
+
+OnExecutionCompleted = Callable[[RunId, CanonicalExecutionResult], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,15 +52,23 @@ class WorkshopPrivateTextExecutionService:
         command_service: WorkshopConversationCommandService,
         database_lock: asyncio.Lock,
         runtime_pool: WorkshopRuntimePool,
+        *,
+        on_completed: OnExecutionCompleted | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator
         self._command_service = command_service
         self._database_lock = database_lock
         self._runtime_pool = runtime_pool
+        self._on_completed = on_completed
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
+        # Strong refs to in-flight on_completed tasks. asyncio holds only
+        # weak refs to tasks created via create_task; without this, a
+        # heap-pressure GC cycle could reap a fire-and-forget hook task
+        # silently. Mirrors memory_extraction.py's _pending_episode_tasks.
+        self._pending_completion_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def open_and_start(
@@ -63,6 +77,7 @@ class WorkshopPrivateTextExecutionService:
         runtime_pool: WorkshopRuntimePool,
         *,
         registered_backend_ids: frozenset[str],
+        on_completed: OnExecutionCompleted | None = None,
     ) -> WorkshopPrivateTextExecutionService:
         store = await WorkshopEventStore.open(database_path)
         database_lock = asyncio.Lock()
@@ -82,6 +97,7 @@ class WorkshopPrivateTextExecutionService:
             WorkshopConversationCommandService(store),
             database_lock,
             runtime_pool,
+            on_completed=on_completed,
         )
         try:
             await coordinator.recover_expired()
@@ -121,7 +137,32 @@ class WorkshopPrivateTextExecutionService:
     ) -> CanonicalExecutionResult:
         if self._closed:
             raise RuntimeError("Workshop private-text execution service is closed")
-        return await self._coordinator.execute(run_id, stream_observer=stream_observer)
+        result = await self._coordinator.execute(run_id, stream_observer=stream_observer)
+        if self._on_completed is not None:
+            self._fire_on_completed(run_id, result)
+        return result
+
+    def _fire_on_completed(self, run_id: RunId, result: CanonicalExecutionResult) -> None:
+        """Fire the on_completed hook fire-and-forget; never delay or fail the turn.
+
+        The hook (safety-flagging for monitored users, wired in main.py) is
+        best-effort background work, not part of turn delivery - the user's
+        response is already durably recorded and on its way by the time
+        this fires. Any hook exception is logged and swallowed here so a
+        broken hook can never surface as a failed turn.
+        """
+        on_completed = self._on_completed
+        assert on_completed is not None
+
+        async def _run() -> None:
+            try:
+                await on_completed(run_id, result)
+            except Exception:
+                log.warning("on_completed hook failed for run %s", run_id, exc_info=True)
+
+        task = asyncio.create_task(_run(), name=f"kai-workshop-on-completed-{run_id}")
+        self._pending_completion_tasks.add(task)
+        task.add_done_callback(self._pending_completion_tasks.discard)
 
     async def run_state(self, run_id: RunId):
         """Return canonical state for one typed run ID."""

@@ -272,7 +272,7 @@ def _decode_callback(data: str) -> _CallbackAction | None:
 
 _MSG_DISABLED = "Memory is not enabled in this install."
 _MSG_UNAVAILABLE = "Memory is temporarily unavailable."
-_MSG_NO_FACTS = "No memories yet. Things you tell Kai will be extracted and stored here over time."
+_MSG_NO_FACTS = "No memories yet. Things you tell Bjornheim AI will be extracted and stored here over time."
 _MSG_QUERY_FAILED = "Memory query failed. Try again in a moment."
 _MSG_SESSION_EXPIRED = "Session expired, resyncing."
 _MSG_NO_SEARCH_RESULTS = "No matching memories found."

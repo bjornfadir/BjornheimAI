@@ -1,4 +1,4 @@
-"""Durable delivery work for Kai Workshop."""
+"""Durable delivery work for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 

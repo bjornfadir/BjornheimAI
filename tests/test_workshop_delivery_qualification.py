@@ -122,7 +122,7 @@ class TestDeliveryQualification:
             assert tuple(row) == (
                 "notification",
                 "-100123",
-                "Kai Workshop notification-group delivery qualification.",
+                "Bjornheim AI Workshop notification-group delivery qualification.",
             )
             async with store.connection.execute("SELECT COUNT(*) FROM delivery_outbox") as cursor:
                 assert (await cursor.fetchone())[0] == 1
@@ -230,9 +230,9 @@ class TestDeliveryQualificationFailures:
         store = await _store(tmp_path / "kai.db")
         qualification = WorkshopDeliveryQualification(store)
         try:
-            with pytest.raises(DeliveryQualificationError, match="No canonical Kai reply"):
+            with pytest.raises(DeliveryQualificationError, match="No canonical Bjornheim AI reply"):
                 await qualification.prepare(101)
-            with pytest.raises(DeliveryQualificationError, match="No canonical Kai reply"):
+            with pytest.raises(DeliveryQualificationError, match="No canonical Bjornheim AI reply"):
                 await qualification.prepare(999)
         finally:
             await store.close()

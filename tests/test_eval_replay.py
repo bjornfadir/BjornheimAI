@@ -420,7 +420,7 @@ class TestInitMemory:
 
 class TestLogFileCapture:
     """`--log-file` MUST attach an INFO-level FileHandler to the root
-    logger so structured Kai log lines (`memory.consolidate.intent`,
+    logger so structured Bjornheim AI log lines (`memory.consolidate.intent`,
     `memory.extract:`, etc.) land in a file instead of being dropped
     by Python's WARNING-only last-resort handler.
 

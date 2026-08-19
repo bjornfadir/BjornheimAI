@@ -17,7 +17,7 @@ const session: WorkshopSession = { channelId, token: "session-secret" };
 
 function message(position: number, body = `Message ${position}`): Record<string, unknown> {
   return {
-    author_display_name: position % 2 ? "Daniel" : "Kai",
+    author_display_name: position % 2 ? "Daniel" : "Bjornheim AI",
     author_kind: position % 2 ? "human" : "agent",
     body,
     channel_id: channelId,
@@ -114,7 +114,7 @@ describe("Workshop client API", () => {
         workshops: [
           {
             workshop_id: "wsp_00000000000000000000000000000001",
-            name: "Kai Workshop",
+            name: "Bjornheim AI Workshop",
             role: "admin",
             channels: [
               {
@@ -126,14 +126,14 @@ describe("Workshop client API", () => {
                 agents: [
                   {
                     agent_id: "agt_00000000000000000000000000000001",
-                    name: "Kai",
+                    name: "Bjornheim AI",
                   },
                 ],
                 participants: [
                   {
                     principal_id: "prn_00000000000000000000000000000002",
                     kind: "agent",
-                    display_name: "Kai",
+                    display_name: "Bjornheim AI",
                   },
                 ],
               },
@@ -156,7 +156,7 @@ describe("Workshop client API", () => {
               agents: [
                 {
                   agentId: "agt_00000000000000000000000000000001",
-                  name: "Kai",
+                  name: "Bjornheim AI",
                 },
               ],
               canSubmitCommands: true,
@@ -165,7 +165,7 @@ describe("Workshop client API", () => {
               name: "Conversation",
               participants: [
                 {
-                  displayName: "Kai",
+                  displayName: "Bjornheim AI",
                   kind: "agent",
                   principalId: "prn_00000000000000000000000000000002",
                 },
@@ -173,7 +173,7 @@ describe("Workshop client API", () => {
               role: "owner",
             },
           ],
-          name: "Kai Workshop",
+          name: "Bjornheim AI Workshop",
           role: "admin",
           workshopId: "wsp_00000000000000000000000000000001",
         },

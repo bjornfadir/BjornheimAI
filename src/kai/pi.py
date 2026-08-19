@@ -65,7 +65,7 @@ def _split_pi_model(model: str, provider: str = "") -> tuple[str, str, str | Non
     """Return provider, model id, and optional thinking suffix.
 
     Pi accepts either ``provider/model`` or a bare model when ``--provider``
-    is supplied separately.  Kai always has an effective provider at runtime,
+    is supplied separately.  Bjornheim AI always has an effective provider at runtime,
     so both documented forms remain usable from ``/model``.
     """
 

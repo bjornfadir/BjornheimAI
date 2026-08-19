@@ -104,7 +104,7 @@ class WorkshopClientAccess:
             rows = list(await cursor.fetchall())
         if len(rows) != 1:
             raise WorkshopClientAccessError(
-                "Telegram user does not resolve to exactly one canonical human and direct channel; restart Kai "
+                "Telegram user does not resolve to exactly one canonical human and direct channel; restart Bjornheim AI "
                 "after configuring the user"
             )
         return PrincipalId(str(rows[0][0])), ChannelId(str(rows[0][1]))

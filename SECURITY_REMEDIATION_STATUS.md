@@ -49,7 +49,7 @@ Runtime fallback removal is enforced at every configuration boundary:
 - runtime routes accept only their named credentials;
 - `make config` never carries `WEBHOOK_SECRET` into a regenerated artifact;
 - `make install` strips it from older artifacts before writing `/etc/kai/env`,
-  or fails before stopping Kai if either named replacement is missing;
+  or fails before stopping Bjornheim AI if either named replacement is missing;
 - `make install-status` continues to identify stale deployed or artifact state.
 
 ## Next safe work
@@ -57,7 +57,7 @@ Runtime fallback removal is enforced at every configuration boundary:
 After deploying runtime fallback removal, confirm that GitHub notifications
 still reach their configured Telegram destination and exercise any active
 generic webhook caller. The original assessment findings are then fully
-remediated, and the next security work is Kai Workspace architecture validation.
+remediated, and the next security work is Bjornheim AI Workspace architecture validation.
 Large trust-boundary module decomposition remains normal engineering debt rather
 than a blocking security fix.
 
@@ -66,13 +66,13 @@ than a blocking security fix.
 The backend registry currently prevents operators from supplying arbitrary
 executable paths, but the registered executables may still live in locations
 owned by an agent target OS user. An agent running as that user could replace a
-shared executable and cross an OS-user boundary when Kai later invokes it for a
+shared executable and cross an OS-user boundary when Bjornheim AI later invokes it for a
 different user.
 
 A root-owned managed backend package store was considered, but is deliberately
 deferred. Implementing dependency-closure discovery, provenance verification,
 promotion, health checks, and rollback for host executables would be a large
-transitional subsystem. Kai Workspace instead assigns binary/image preparation
+transitional subsystem. Bjornheim AI Workspace instead assigns binary/image preparation
 to its worker Runtime Backend contract and makes isolated container workers the
 personal-production boundary. The current server-process runtime is therefore
 classified as a trusted-host compatibility and migration mode.

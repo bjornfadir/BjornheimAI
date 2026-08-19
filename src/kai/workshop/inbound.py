@@ -1,4 +1,4 @@
-"""Authenticated inbound-message shadow records for Kai Workshop."""
+"""Authenticated inbound-message shadow records for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 

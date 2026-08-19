@@ -1,4 +1,4 @@
-"""Process-local authentication and authorization for Kai's internal HTTP API.
+"""Process-local authentication and authorization for Bjornheim AI's internal HTTP API.
 
 Persistent and one-shot agents need a narrow way to call the loopback API, but
 must never receive an external webhook signing secret or choose another user's
@@ -65,7 +65,7 @@ class InternalAPIPrincipal:
 class InternalAPIAuth:
     """Issue and resolve random credentials for internal API principals.
 
-    Credentials live only for the lifetime of the outer Kai process. Persistent
+    Credentials live only for the lifetime of the outer Bjornheim AI process. Persistent
     backends are lazy children of that same process, so they receive the current
     credential whenever they start and do not require an at-rest token store.
 

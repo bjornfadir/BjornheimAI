@@ -1,4 +1,4 @@
-# Memory project registry for Kai.
+# Memory project registry for Bjornheim AI.
 #
 # Copy to memory-projects.yaml (or /etc/kai/memory-projects.yaml for
 # protected installations) and customize.
@@ -44,7 +44,7 @@
 projects:
   # Example: enabled project with two roots
   # - project_id: kai
-  #   display_name: Kai
+  #   display_name: Bjornheim AI
   #   workspace_roots:
   #     - /Users/kai/Projects/kai
   #     - /var/lib/kai/home/2114582497

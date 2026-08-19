@@ -83,7 +83,7 @@ async def transcribe_voice(audio_data: bytes, model_path: Path) -> str:
         )
 
         # Step 2: Transcribe WAV → text via whisper-cli. The Metal path in
-        # current whisper.cpp builds is not reliable from Kai's macOS
+        # current whisper.cpp builds is not reliable from Bjornheim AI's macOS
         # LaunchDaemon context: it can hang until the outer timeout, while the
         # same input completes promptly on CPU. Keep GPU selection unchanged
         # on other platforms.

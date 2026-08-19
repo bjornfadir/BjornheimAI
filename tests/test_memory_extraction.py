@@ -1402,13 +1402,13 @@ class TestRenderCandidateLine:
     def test_full_render_with_known_fields(self):
         cand = _candidate(
             id="55acddee-c1a2-44ef-97b2-9f76880b3fff",
-            text="Kai's DATA_DIR is /var/lib/kai/.",
+            text="Bjornheim AI's DATA_DIR is /var/lib/kai/.",
             metadata={"source": "extracted", "confidence": 0.9},
         )
         line = _render_candidate_line(cand)
         assert (
             line
-            == "[55acddee-c1a2-44ef-97b2-9f76880b3fff] (source=extracted, conf=0.9) Kai's DATA_DIR is /var/lib/kai/."
+            == "[55acddee-c1a2-44ef-97b2-9f76880b3fff] (source=extracted, conf=0.9) Bjornheim AI's DATA_DIR is /var/lib/kai/."
         )
 
     def test_none_confidence_renders_n_a(self):
@@ -4188,7 +4188,7 @@ def _active_project(**overrides) -> ActiveMemoryProject:
     """
     defaults: dict = {
         "project_id": "kai",
-        "display_name": "Kai",
+        "display_name": "Bjornheim AI",
         "matched_root": Path("/work/kai"),
         "memory_enabled": True,
         "default_scope_for_new_facts": None,
@@ -4634,7 +4634,7 @@ class TestWorkspaceThreading:
             memory_projects={
                 "kai": MemoryProjectConfig(
                     project_id="kai",
-                    display_name="Kai",
+                    display_name="Bjornheim AI",
                     workspace_roots=(root,),
                     memory_enabled=True,
                     default_scope_for_new_facts=None,
@@ -4773,7 +4773,7 @@ class TestConsolidationCandidateScope:
             memory_projects={
                 "kai": MemoryProjectConfig(
                     project_id="kai",
-                    display_name="Kai",
+                    display_name="Bjornheim AI",
                     workspace_roots=(root,),
                     memory_enabled=True,
                     default_scope_for_new_facts=None,

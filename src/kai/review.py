@@ -74,7 +74,7 @@ _REVIEW_TIMEOUT = 900
 
 # Header prepended to every review comment on GitHub. Distinguishes
 # automated reviews from human comments. Per design decision #11.
-_REVIEW_HEADER = "## Review by Kai\n\n"
+_REVIEW_HEADER = "## Review by Bjornheim AI\n\n"
 
 
 def _github_cli_env(github_token: str | None) -> dict[str, str] | None:
@@ -702,7 +702,7 @@ async def fetch_prior_comments(repo: str, pr_number: int, github_token: str | No
 
     Uses the GitHub API via gh to retrieve top-level PR comments (issue
     comments endpoint, not inline review comments). Filters for comments
-    that start with the "## Review by Kai" header, plus any comments that
+    that start with the "## Review by Bjornheim AI" header, plus any comments that
     appear after each review comment (likely replies or reactions).
 
     Comments before the first review comment are excluded since they
@@ -763,7 +763,7 @@ async def fetch_prior_comments(repo: str, pr_number: int, github_token: str | No
     if not isinstance(comments, list) or not comments:
         return None
 
-    # Build thread segments: each segment starts with a "Review by Kai"
+    # Build thread segments: each segment starts with a "Review by Bjornheim AI"
     # comment and includes all subsequent comments until the next review.
     # Comments before the first review are ignored.
     threads: list[list[str]] = []
@@ -774,8 +774,8 @@ async def fetch_prior_comments(repo: str, pr_number: int, github_token: str | No
         author = comment.get("user", {}).get("login", "unknown")
         timestamp = comment.get("created_at", "")
 
-        # Check if this comment is a review by Kai. Use the stripped
-        # header ("## Review by Kai") to match regardless of trailing
+        # Check if this comment is a review by Bjornheim AI. Use the stripped
+        # header ("## Review by Bjornheim AI") to match regardless of trailing
         # newlines in the actual comment body.
         is_review = body.startswith(_REVIEW_HEADER.rstrip())
 
@@ -3186,7 +3186,7 @@ async def post_review_comment(repo: str, pr_number: int, review: str, github_tok
     """
     Post the review as a single GitHub PR comment via the gh CLI.
 
-    Prepends the "Review by Kai" header to distinguish automated reviews
+    Prepends the "Review by Bjornheim AI" header to distinguish automated reviews
     from human comments. Uses `gh pr comment` which handles auth via the
     existing gh CLI configuration.
 

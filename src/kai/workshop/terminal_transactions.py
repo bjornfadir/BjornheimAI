@@ -55,6 +55,7 @@ class TerminalFailureCode(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     TRANSIENT = "transient"
     BACKEND_CRASHED = "backend_crashed"
+    TIMEOUT = "timeout"
     NO_RESPONSE = "no_response"
     EXECUTION_INTERRUPTED = "execution_interrupted"
     UNKNOWN = "unknown"
@@ -62,27 +63,33 @@ class TerminalFailureCode(StrEnum):
 
 _FAILURE_MESSAGES = {
     TerminalFailureCode.AUTHENTICATION_EXPIRED: (
-        "Authentication for the configured agent has expired. Kai did not complete this request."
+        "Authentication for the configured agent has expired. Bjornheim AI did not complete this request."
     ),
     TerminalFailureCode.AUTHENTICATION_REQUIRED: (
-        "Authentication for the configured agent is required. Kai did not complete this request."
+        "Authentication for the configured agent is required. Bjornheim AI did not complete this request."
     ),
     TerminalFailureCode.QUOTA_EXHAUSTED: (
-        "The configured agent reported that its usage allowance is exhausted. Kai did not complete this request."
+        "The configured agent reported that its usage allowance is exhausted. Bjornheim AI did not complete this request."
     ),
-    TerminalFailureCode.MODEL_UNAVAILABLE: ("The configured model is unavailable. Kai did not complete this request."),
+    TerminalFailureCode.MODEL_UNAVAILABLE: (
+        "The configured model is unavailable. Bjornheim AI did not complete this request."
+    ),
     TerminalFailureCode.PROVIDER_UNAVAILABLE: (
-        "The configured agent provider is unavailable. Kai did not complete this request."
+        "The configured agent provider is unavailable. Bjornheim AI did not complete this request."
     ),
     TerminalFailureCode.TRANSIENT: (
-        "The configured agent reported a temporary failure. Kai did not complete this request."
+        "The configured agent reported a temporary failure. Bjornheim AI did not complete this request."
     ),
     TerminalFailureCode.BACKEND_CRASHED: (
-        "The configured agent stopped unexpectedly. Kai did not complete this request."
+        "The configured agent stopped unexpectedly. Bjornheim AI did not complete this request."
     ),
-    TerminalFailureCode.NO_RESPONSE: "The configured agent returned no response. Kai did not complete this request.",
+    TerminalFailureCode.TIMEOUT: (
+        "The configured agent took too long to respond and the request timed out. "
+        "Bjornheim AI did not complete this request. Try a shorter or more specific question, or retry."
+    ),
+    TerminalFailureCode.NO_RESPONSE: "The configured agent returned no response. Bjornheim AI did not complete this request.",
     TerminalFailureCode.EXECUTION_INTERRUPTED: (
-        "Kai was interrupted while the configured agent was working. This request was not retried."
+        "Bjornheim AI was interrupted while the configured agent was working. This request was not retried."
     ),
     TerminalFailureCode.UNKNOWN: "The configured agent could not complete this request.",
 }

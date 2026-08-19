@@ -1,4 +1,4 @@
-# Goose extension configuration for Kai.
+# Goose extension configuration for Bjornheim AI.
 #
 # Deployed to ~/.config/goose/config.yaml by `make install` when
 # DEFAULT_BACKEND=goose. Controls which Goose extensions are loaded

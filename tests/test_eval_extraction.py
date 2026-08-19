@@ -49,7 +49,7 @@ _TEST_CONFIG = Config(
 # `v5_prompt_hash` key was renamed to `baseline_prompt_hash` at
 # #428 landing; downstream tools should branch on the report's
 # top-level `version` field.
-_V5_PROMPT_HASH = "764f249d2556a6e00489ac7ba5eac265f4a4d09f27d21dc76f612b84f0874c13"
+_V5_PROMPT_HASH = "0c7d65eef58aef475e146c39a182f211632160759ce20b4d8cb1bf240338a665"
 
 # Hash of `_PROMPT_V6_PINNED` captured at #428 landing (the v6
 # active prompt immediately before the v7 EPISODE CLASSIFICATION
@@ -57,7 +57,7 @@ _V5_PROMPT_HASH = "764f249d2556a6e00489ac7ba5eac265f4a4d09f27d21dc76f612b84f0874
 # silent edit of the pinned constant fails this test, while an
 # intentional capture of a new baseline must update both the
 # pinned constant AND this hash.
-_V6_PROMPT_HASH = "4f1e03dd37d9d52bb39724f949f7c382343837608497ebcd2ab3ae4990d3030c"
+_V6_PROMPT_HASH = "80d132119b4da7e45a3996fc532674b55c1d2942e57ccdaa0f19ae6e03396792"
 
 
 def test_v5_pinned_drift():

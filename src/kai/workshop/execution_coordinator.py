@@ -95,6 +95,7 @@ _FAILURE_CODE_BY_KIND = {
     AgentFailureKind.PROVIDER_UNAVAILABLE: TerminalFailureCode.PROVIDER_UNAVAILABLE,
     AgentFailureKind.TRANSIENT: TerminalFailureCode.TRANSIENT,
     AgentFailureKind.BACKEND_CRASHED: TerminalFailureCode.BACKEND_CRASHED,
+    AgentFailureKind.TIMEOUT: TerminalFailureCode.TIMEOUT,
     AgentFailureKind.UNKNOWN: TerminalFailureCode.UNKNOWN,
 }
 

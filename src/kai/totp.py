@@ -1,5 +1,5 @@
 """
-TOTP verification and rate-limiting for Kai session authentication.
+TOTP verification and rate-limiting for Bjornheim AI session authentication.
 
 The TOTP secret and attempt state live in root-owned files under /etc/kai/.
 The bot accesses them via sudoers-authorized `sudo cat` and `sudo tee` calls.
@@ -379,7 +379,7 @@ def _cmd_setup() -> None:
     # Generate and print the QR code to the terminal.
     import qrcode  # type: ignore[import-untyped]
 
-    uri = pyotp.TOTP(secret).provisioning_uri(name="Kai", issuer_name="Kai")
+    uri = pyotp.TOTP(secret).provisioning_uri(name="Bjornheim AI", issuer_name="Bjornheim AI")
     qr = qrcode.QRCode()
     qr.add_data(uri)
     qr.make(fit=True)
@@ -388,7 +388,7 @@ def _cmd_setup() -> None:
 
     # Also print the raw secret for manual entry.
     print(f"\nManual entry secret: {secret}")
-    print("Account: Kai / Issuer: Kai")
+    print("Account: Bjornheim AI / Issuer: Bjornheim AI")
 
     # Print the sudoers rule BEFORE asking for the confirmation code.
     # The bot process (running as the 'kai' user) needs these rules to verify

@@ -299,10 +299,10 @@ class WorkshopHumanProvisioner:
             "JOIN principals p ON p.id = a.principal_id AND p.kind = 'agent' "
             "JOIN workshop_memberships wm ON wm.workshop_id = a.workshop_id "
             "AND wm.principal_id = a.principal_id AND wm.role = 'agent' "
-            "WHERE a.workshop_id = ? AND a.name = 'Kai'",
+            "WHERE a.workshop_id = ? AND a.name = 'Bjornheim AI'",
             (workshop_id,),
         ) as cursor:
             rows = list(await cursor.fetchall())
         if len(rows) != 1:
-            raise WorkshopHumanProvisioningError("Workshop does not contain exactly one canonical Kai agent")
+            raise WorkshopHumanProvisioningError("Workshop does not contain exactly one canonical Bjornheim AI agent")
         return AgentId(str(rows[0][0])), PrincipalId(str(rows[0][1]))

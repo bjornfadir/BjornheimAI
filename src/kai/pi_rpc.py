@@ -6,7 +6,7 @@ This module owns the framing and the small set of event semantics that the
 conversational backend and one-shot reasoner agree on.
 
 It intentionally does not launch Pi itself. Process lifecycle, user isolation,
-and Kai ``StreamEvent`` conversion belong to those two callers.
+and Bjornheim AI ``StreamEvent`` conversion belong to those two callers.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-# Match the per-line headroom used by Kai's other streaming backends.  Pi
+# Match the per-line headroom used by Bjornheim AI's other streaming backends.  Pi
 # emits tool results and final messages as single JSON records, so the default
 # asyncio subprocess reader limit (64 KiB) is too small for real agent turns.
 PI_RPC_STREAM_LIMIT = 16 * 1024 * 1024
@@ -131,7 +131,7 @@ class PiRpcTransport:
 
         ``timeout_seconds=None`` waits indefinitely.  Callers normally pass
         their remaining turn/startup budget so a stalled Pi process cannot
-        hold a Kai request forever.
+        hold a Bjornheim AI request forever.
         """
 
         try:

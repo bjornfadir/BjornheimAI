@@ -158,7 +158,7 @@ class TestGetRecentHistory:
         log_message(direction="assistant", chat_id=1, text="hi there")
         result = get_recent_history()
         assert "You: hello" in result
-        assert "Kai: hi there" in result
+        assert "Bjornheim AI: hi there" in result
 
     def test_truncates_long_messages(self, _log_dir):
         long_text = "x" * 600

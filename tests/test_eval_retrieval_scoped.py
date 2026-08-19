@@ -694,7 +694,7 @@ class TestProjectRegistryBootstrap:
         rows = [
             {
                 "project_id": "kaiproj",
-                "display_name": "Kai project",
+                "display_name": "Bjornheim AI project",
                 "workspace_root": str(root),
                 "memory_enabled": True,
                 "default_scope_for_new_facts": "project",
@@ -830,7 +830,7 @@ class TestCLIFilters:
         registry = {
             "kaiproj": MemoryProjectConfig(
                 project_id="kaiproj",
-                display_name="Kai",
+                display_name="Bjornheim AI",
                 workspace_roots=(root.resolve(),),
                 memory_enabled=True,
                 default_scope_for_new_facts="project",

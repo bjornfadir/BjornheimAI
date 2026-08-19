@@ -49,9 +49,9 @@ def replace_named_read_access(
     *,
     directory: bool,
 ) -> None:
-    """Replace Kai-managed extended ACLs with at most one named reader.
+    """Replace Bjornheim AI-managed extended ACLs with at most one named reader.
 
-    Protected history and upload paths are Kai-owned, so the installer owns
+    Protected history and upload paths are Bjornheim AI-owned, so the installer owns
     their complete extended-ACL contract. Clearing first prevents an old
     ``os_user`` from retaining access after an operator changes users.yaml.
     """

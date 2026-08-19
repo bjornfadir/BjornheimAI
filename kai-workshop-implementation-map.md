@@ -1,14 +1,14 @@
-# Kai Workshop: Phase 0 Implementation Map
+# Bjornheim AI Workshop: Phase 0 Implementation Map
 
 **Status:** Active migration plan; first canonical conversation delivery authority live
 **Date:** 2026-08-12
-**Scope:** Map and execute the current Kai implementation's migration onto the proposed Kai Workshop architecture.
+**Scope:** Map and execute the current Bjornheim AI implementation's migration onto the proposed Bjornheim AI Workshop architecture.
 
 ## 1. Naming and scope
 
-**Kai Workshop** is the product: the server-hosted collaboration environment used through desktop, web, Telegram, and future clients.
+**Bjornheim AI Workshop** is the product: the server-hosted collaboration environment used through desktop, web, Telegram, and future clients.
 
-A **workspace** keeps its existing Kai meaning: a project or filesystem execution context, usually a repository or directory in which an agent works. The product name no longer competes with this established term.
+A **workspace** keeps its existing Bjornheim AI meaning: a project or filesystem execution context, usually a repository or directory in which an agent works. The product name no longer competes with this established term.
 
 For the target domain model, this map uses:
 
@@ -23,7 +23,7 @@ The first installation may contain exactly one workshop, but identifiers and for
 
 ## 2. Executive assessment
 
-Kai can move toward Kai Workshop incrementally without replacing the working Telegram system or the five backend harnesses.
+Bjornheim AI can move toward Bjornheim AI Workshop incrementally without replacing the working Telegram system or the five backend harnesses.
 
 The strongest existing foundations are:
 
@@ -86,7 +86,7 @@ The outer process is already a control plane in the practical sense: it authenti
 | Scheduled jobs | `jobs` table and APScheduler registration | Integer job ID + chat ID | Job definitions survive restart, but executions are not durable runs with attempts and event history. |
 | Project workspace selection | Settings, `allowed_workspaces`, `workspace_history`, static configuration | Chat ID + filesystem path | A project workspace is not a first-class durable object and is coupled to the current chat. |
 | Memory | Qdrant/Mem0 plus per-user files and memory project registry | Stringified chat ID and optional project ID | Useful principal/project scoping exists, but principal IDs are Telegram-derived and no channel/run memory layer exists. |
-| Files | Per-chat paths beneath the Kai data directory | Chat ID + generated filename | No immutable artifact identity, provenance record, channel visibility, or delivery lifecycle. |
+| Files | Per-chat paths beneath the Bjornheim AI data directory | Chat ID + generated filename | No immutable artifact identity, provenance record, channel visibility, or delivery lifecycle. |
 | Internal agent authority | Process-local credentials in [`internal_api_auth.py`](src/kai/internal_api_auth.py) | Credential -> fixed chat ID/scopes | Good capability foundation, but the principal is still represented by chat ID and credentials do not survive control-plane restart. |
 | External services | Static service definitions and per-user grants in [`services.py`](src/kai/services.py) | Service name + chat ID | A useful connector/secret-broker precursor, without attempt-scoped grants or durable access events. |
 | GitHub events | Verified webhook handling and per-user routing in [`webhook.py`](src/kai/webhook.py) | Repository/event payload + configured user | Notifications and automation are not projected into canonical channels/events. |
@@ -96,9 +96,9 @@ The outer process is already a control plane in the practical sense: it authenti
 
 ### 5.1 Sender identity and conversation identity are already distinct at ingress
 
-Telegram exposes an effective user and an effective chat. Kai's authorization wrapper checks the user ID, while message processing, pool selection, history, jobs, settings, and files use the chat ID. In private chats those numbers usually coincide, hiding the distinction.
+Telegram exposes an effective user and an effective chat. Bjornheim AI's authorization wrapper checks the user ID, while message processing, pool selection, history, jobs, settings, and files use the chat ID. In private chats those numbers usually coincide, hiding the distinction.
 
-Kai Workshop must preserve the distinction explicitly:
+Bjornheim AI Workshop must preserve the distinction explicitly:
 
 ```text
 Telegram user ID  -> external_identity -> human principal
@@ -112,7 +112,7 @@ This also preserves the existing security rule that a Telegram group used only a
 
 The selected backend, model, process, identity files, memory, and permissions collectively behave like an agent, but there is no durable named agent object. They are resolved primarily from the owning user's configuration and current chat state.
 
-The first Workshop schema needs a durable default agent definition, even if the UI initially displays only one agent named Kai. Backend and model selection become policy on that agent or its channel attachment, rather than identity itself. Switching from Codex to Pi must not create a different agent identity.
+The first Workshop schema needs a durable default agent definition, even if the UI initially displays only one agent named Bjornheim AI. Backend and model selection become policy on that agent or its channel attachment, rather than identity itself. Switching from Codex to Pi must not create a different agent identity.
 
 ### 5.3 A project workspace is not the collaboration boundary
 
@@ -241,11 +241,11 @@ Retain current per-user file storage. Add artifact metadata containing a stable 
 
 These recommendations narrow the original design's open decisions for the first Workshop slice.
 
-1. **Multi-principal schema from day one.** The first deployment can remain personal, but principals and memberships must not be omitted. Kai's existing multi-user and OS-user isolation makes a single-principal schema a regression.
+1. **Multi-principal schema from day one.** The first deployment can remain personal, but principals and memberships must not be omitted. Bjornheim AI's existing multi-user and OS-user isolation makes a single-principal schema a regression.
 2. **One default workshop at migration.** Create one workshop automatically for an existing installation. Do not expose multi-workshop administration in the first UI.
-3. **SQLite first, behind an event-store interface.** Kai already operates a single-server transactional SQLite database in WAL mode. Add the initial event log and projections there. PostgreSQL remains the target when concurrency or deployment topology requires it; adopting it before validating the domain would add operational work without improving the first slice.
+3. **SQLite first, behind an event-store interface.** Bjornheim AI already operates a single-server transactional SQLite database in WAL mode. Add the initial event log and projections there. PostgreSQL remains the target when concurrency or deployment topology requires it; adopting it before validating the domain would add operational work without improving the first slice.
 4. **One Telegram chat binding to one channel.** Existing private-chat history maps to a default direct channel. Notification-only Telegram groups remain delivery destinations unless explicitly configured as interactive bindings later.
-5. **One durable default agent named Kai.** Preserve current behavior while separating agent identity from the selected harness and model. All five harnesses remain equal selectable drivers.
+5. **One durable default agent named Bjornheim AI.** Preserve current behavior while separating agent identity from the selected harness and model. All five harnesses remain equal selectable drivers.
 6. **Continue one session per channel/agent by default.** Preserve current conversational continuity. `/new` begins a new harness session without deleting channel history. Explicit branching and cross-channel session policies can follow capability discovery.
 7. **Trusted local process during migration.** Keep the currently working runtime while building the domain/event seam. Container execution begins when durable runs and attempts can describe, observe, and recover it.
 8. **Telegram remains the first write client.** The first web surface is read-only diagnostics/replay. It should not accept commands until server authorization, idempotency, and delivery behavior are proven independently of Telegram.
@@ -301,7 +301,7 @@ The delivery foundation adds only the request and outcome facts the system can d
 Every PR that introduces a shadow write, compatibility adapter, fallback, dual-read path, feature flag, or legacy projection must also add or update an entry in the transition retirement ledger in section 17. Transitional work is incomplete until its removal conditions and deletion scope are recorded.
 
 1. **Domain and store contract, unused by production:** typed identifiers, versioned event envelope, SQLite schema/migrations, append/idempotency/projection tests.
-2. **Bootstrap migration:** create the default workshop, human principals, default Kai agent, and Telegram channel bindings deterministically for existing configured users. Dry-run/status diagnostics must disclose actions without exposing secrets.
+2. **Bootstrap migration:** create the default workshop, human principals, default Bjornheim AI agent, and Telegram channel bindings deterministically for existing configured users. Dry-run/status diagnostics must disclose actions without exposing secrets.
 3. **Inbound shadow recorder:** append canonical inbound `message.created` events after existing Telegram authentication, using Telegram update/message identity for deduplication. Existing handler behavior remains unchanged.
 4. **Outbound shadow recorder:** append the final assistant message and explicit delivery observations without changing streaming or notification behavior.
 5. **Parity and replay diagnostic:** rebuild the channel projection from events, compare it with current history, and expose a local read-only diagnostic endpoint or page.
@@ -370,10 +370,10 @@ The following should not be bundled into the canonical conversation foundation:
 
 The design remains directionally sound, with these updates:
 
-1. Rename the product from **Kai Workspace** to **Kai Workshop**.
+1. Rename the product from **Bjornheim AI Workspace** to **Bjornheim AI Workshop**.
 2. Reserve **workspace** for project/filesystem execution contexts.
 3. Rename the original top-level Workspace domain object to **Workshop**.
-4. Replace the "first harness, then Codex and Claude Code" sequence. Kai already has five production-tested harness adapters; the target contract must be validated against all five.
+4. Replace the "first harness, then Codex and Claude Code" sequence. Bjornheim AI already has five production-tested harness adapters; the target contract must be validated against all five.
 5. Recognize the current protected backend registry and `local_process` runtime as migration foundations.
 6. Move Harness Driver and Runtime Backend extraction behind the canonical conversation/event foundation unless a specific implementation blocker proves otherwise.
 7. Add the existing durable Telegram queue as the model for command acceptance, while keeping commands, events, projections, and delivery outbox conceptually separate.
@@ -381,7 +381,7 @@ The design remains directionally sound, with these updates:
 
 ## 16. Phase 0 conclusion
 
-Kai Workshop should begin by giving the conversation durable, transport-independent identity. Kai already runs agents on the server, already supports five harnesses, and already persists enough operational state to migrate safely. Building a desktop shell before defining that shared truth would force the UI to reproduce Telegram assumptions.
+Bjornheim AI Workshop should begin by giving the conversation durable, transport-independent identity. Bjornheim AI already runs agents on the server, already supports five harnesses, and already persists enough operational state to migrate safely. Building a desktop shell before defining that shared truth would force the UI to reproduce Telegram assumptions.
 
 The next safe implementation step, after review of this map, is a test-first PR containing only the Workshop domain identifiers, versioned event envelope, SQLite event-store schema, projection contract, and idempotency tests. It should not yet alter a production message path.
 
@@ -455,7 +455,7 @@ A transitional path may be removed only when all applicable gates pass:
 - GitHub and generic webhook contracts remain valid where affected;
 - migration and rollback procedures are documented and tested for persistent data;
 - `make config`, `make install`, and `make install-status` accurately represent the new authority;
-- an installed-system smoke test confirms Kai remains usable.
+- an installed-system smoke test confirms Bjornheim AI remains usable.
 
 Rollback must not become a reason to keep two authorities indefinitely. During a bounded rollback window, new-schema data must have an explicit backward strategy or the release must declare that rollback requires restoring a backup.
 
@@ -496,7 +496,7 @@ The review distinguishes implemented structural evidence from live operational e
 | Installed-system parity across fresh messages and a service restart | Clean installed smoke observations exist, including the post-outbox installation at `canonical=32`, `projected=32`, `replay mismatches=0`, and two-way JSONL parity, but the diagnostic has not yet accumulated reviewed, sustained clean observations from the deployed installation | Not yet proven |
 | Media ingress and artifact provenance | Canonical artifact identity, additive metadata storage, deterministic projection replay, and fail-open Telegram photo/document/voice adapters record content hash, size, normalized MIME type, owning message/channel/principal, non-retrievable transport unique ID, bounded original filename where applicable, and local storage provenance. Successful voice transcription preserves the original Ogg/Opus bytes without adding their path to the backend prompt. Installed photo/document access and voice transcription were verified, followed by a service restart and clean canonical-to-JSONL parity (`canonical=30`, `projected=30`, `replay mismatches=0`). | Pass in automated and installed smoke tests |
 | Canonical timeline query and client synchronization | The live loopback HTTP server exposes rate-limited grant redemption, authenticated snapshot-stable timeline reads, and an authenticated resumable canonical-message event stream. Operator-only commands issue a short-lived grant for an existing canonical Telegram human and revoke either the unredeemed grant or a device and all its sessions. Tokens are shown once and stored only as hashes. Installed enrollment, timeline, restart persistence, revocation, and denial-after-revocation passed on 2026-08-12. Installed snapshot-to-stream handoff, restart recovery from `Last-Event-ID` without replay, later live delivery, and denial after device revocation passed on 2026-08-13. | Pass |
-| Durable outbound delivery | A production-unused foundation atomically records `delivery.requested` with pending work, uses exclusive expiring leases and immutable attempt records, applies bounded deterministic retry policy, rejects stale completion, and recovers expired work after restart. Terminal outbox settlement atomically appends versioned `delivery.succeeded` or `delivery.failed` facts carrying the exact channel-binding identity; legacy shadow observations remain replayable beside those facts. Claims are FIFO across all modes for one canonical binding, including while a predecessor is leased or waiting to retry, while distinct bindings progress independently. An unregistered Telegram text adapter/worker claims only matching transport/mode work, targets canonical private/group bindings, preserves Kai's Markdown fallback, and sanitizes provider failures. Long text receives an immutable durable fragment plan; confirmed fragment IDs survive restart and are skipped on resume. A fragment is marked `sending` before the Bot API call. Timeout, network ambiguity, invalid success evidence, or lease expiry in that window produces terminal `uncertain` state instead of an automatic duplicate. Tests cover concurrent claims, request and outcome rollback, retry exhaustion, restart/resume recovery, target isolation, notification groups, binding-aware projection, cross-delivery and fragment ordering, ambiguity, and projection rebuild preservation. | Partial (outcome, ordering, fragment, and ambiguity contracts implemented but worker remains unregistered; no production enqueue, installed live recovery evidence, or authority change) |
+| Durable outbound delivery | A production-unused foundation atomically records `delivery.requested` with pending work, uses exclusive expiring leases and immutable attempt records, applies bounded deterministic retry policy, rejects stale completion, and recovers expired work after restart. Terminal outbox settlement atomically appends versioned `delivery.succeeded` or `delivery.failed` facts carrying the exact channel-binding identity; legacy shadow observations remain replayable beside those facts. Claims are FIFO across all modes for one canonical binding, including while a predecessor is leased or waiting to retry, while distinct bindings progress independently. An unregistered Telegram text adapter/worker claims only matching transport/mode work, targets canonical private/group bindings, preserves Bjornheim AI's Markdown fallback, and sanitizes provider failures. Long text receives an immutable durable fragment plan; confirmed fragment IDs survive restart and are skipped on resume. A fragment is marked `sending` before the Bot API call. Timeout, network ambiguity, invalid success evidence, or lease expiry in that window produces terminal `uncertain` state instead of an automatic duplicate. Tests cover concurrent claims, request and outcome rollback, retry exhaustion, restart/resume recovery, target isolation, notification groups, binding-aware projection, cross-delivery and fragment ordering, ambiguity, and projection rebuild preservation. | Partial (outcome, ordering, fragment, and ambiguity contracts implemented but worker remains unregistered; no production enqueue, installed live recovery evidence, or authority change) |
 | Legacy transcript consumers | Context assembly, memory provenance, evaluation, and operator history tools still read JSONL directly | Not migrated |
 
 ### 18.1 Authority consequences
@@ -514,7 +514,7 @@ The review distinguishes implemented structural evidence from live operational e
 3. **Canonical channel authorization policy:** implemented with explicit, replayable channel memberships. Workshop membership alone does not imply access to every direct channel; the current shared default workshop makes that unsafe. The concrete timeline authorizer requires both an explicit channel membership and membership in the channel's workshop.
 4. **Authenticated read-only client surface:** the live loopback HTTP server exposes canonical, snapshot-stable timeline pages and a resumable canonical-message event stream through durable human-client bearer sessions. A trusted operator can issue a ten-minute, single-use grant only for a configured canonical Telegram human, or revoke an unredeemed grant or tracked device. Redemption accepts no principal claim, atomically creates one device and thirty-day session, returns the session token once, and exposes no grant-issuance HTTP method. Malformed, expired, revoked, and reused grants share one bounded denial. Per-source and process-wide enrollment rate limits apply; Cloudflare's connecting address is advisory rate-limit partitioning only and never identity. Responses prohibit storage, referrers, and content interpretation. The server remains loopback-bound, so remote use requires the existing TLS tunnel or another trusted TLS terminator. One shared lock serializes short database operations over the dedicated client connection; event streams never retain that lock while connected. Backend-process credentials remain a separate trust domain. Installed enrollment, restart, timeline, revocation, and denial-after-revocation passed on 2026-08-12. Installed timeline-to-stream handoff, restart recovery without replay, a later live event, and revocation denial passed on 2026-08-13.
 5. **Media and artifact shadow:** implemented for successful Telegram photos, documents, and voice messages. The canonical artifact foundation records content identity and bounded local-storage provenance only for an existing human-authored canonical message. Each adapter marks only confirmed canonical message writes for legacy parity and fails open without changing prompts, agent invocation, JSONL authority, or Telegram delivery. Document metadata uses a normalized valid transport MIME type, a deterministic fallback, and a bounded cross-platform basename. New media and staged review files use the canonical human `PrincipalId` as their local directory key; successful voice transcription preserves the original Ogg/Opus bytes there without exposing the path to the backend prompt. Existing numeric upload directories remain readable through the authenticated internal file API during migration and are not moved or deleted by this cutover.
-6. **Durable delivery outbox:** the production-unused foundation defines atomic `delivery.requested` work, immutable attempts, exclusive expiring claims, bounded retry/failure policy, stale-lease rejection, and crash recovery. Terminal settlement atomically records a binding-aware version-2 success or failure fact, while legacy version-1 shadow observations remain replayable. Claiming now serializes all modes by request position for one binding without blocking a different binding. Its unregistered Telegram adapter/worker handles durably planned, ordered text fragments for canonical private or notification-group bindings and claims no other transport/mode. Confirmed fragments resume without resend. The external-send/database-commit ambiguity is fail-closed: an in-flight fragment without confirmation becomes terminally uncertain and requires reconciliation rather than automatic retry. It neither registers at startup nor enqueues or replaces a direct Telegram send. An operator-invoked qualification command can prepare the latest existing canonical Kai reply for one configured direct Telegram user, inspect it, deliberately abandon an exact lease, and run only that named delivery. It cannot drain or recover unrelated work and does not create another message or alter transcript parity. Installed live recovery evidence remains required before activation.
+6. **Durable delivery outbox:** the production-unused foundation defines atomic `delivery.requested` work, immutable attempts, exclusive expiring claims, bounded retry/failure policy, stale-lease rejection, and crash recovery. Terminal settlement atomically records a binding-aware version-2 success or failure fact, while legacy version-1 shadow observations remain replayable. Claiming now serializes all modes by request position for one binding without blocking a different binding. Its unregistered Telegram adapter/worker handles durably planned, ordered text fragments for canonical private or notification-group bindings and claims no other transport/mode. Confirmed fragments resume without resend. The external-send/database-commit ambiguity is fail-closed: an in-flight fragment without confirmation becomes terminally uncertain and requires reconciliation rather than automatic retry. It neither registers at startup nor enqueues or replaces a direct Telegram send. An operator-invoked qualification command can prepare the latest existing canonical Bjornheim AI reply for one configured direct Telegram user, inspect it, deliberately abandon an exact lease, and run only that named delivery. It cannot drain or recover unrelated work and does not create another message or alter transcript parity. Installed live recovery evidence remains required before activation.
 7. **Repeat the authority review:** require sustained installed parity, media coverage, read-client restart/reconnect evidence, and live delivery recovery before approving a cutover PR.
 
 The secure client-enrollment boundary and read-only HTTP contract for item 4 are now registered in production. They bind the initial device and session to a principal established by the operator, never by an untrusted client identity claim, and preserve the separation from backend-process credentials. Session, device, and enrollment rows are mutable security state rather than replayed collaboration projections; later append-only audit events may record their lifecycle but must never be capable of reactivating a credential.
@@ -538,10 +538,10 @@ This decision does not reopen the mechanics already qualified. It separates a su
 | Sustained canonical projection and JSONL parity | Installed observations remained clean through plain text, photo, document, voice, service restarts, outbox foundations, and the live qualification. The post-qualification diagnostic reported `canonical=36`, `projected=36`, zero replay mismatches, and two-way JSONL parity. | Pass for this review |
 | Media ingress | Installed photo/document access and voice transcription succeeded, including restart verification and clean parity. | Pass |
 | Durable worker mechanics | Automated contracts cover exclusive claims, bounded retry, per-binding FIFO ordering, fragment resume, stale leases, projection rebuild, and fail-closed ambiguous sends. | Pass |
-| Installed direct-chat recovery | One existing canonical reply was prepared without sending, claimed and deliberately abandoned, observed as leased after a Kai restart, recovered after lease expiry, delivered once through Telegram on attempt 2 of 3, and recorded as succeeded. The extra transport delivery did not create another canonical message or disturb parity. | Pass |
+| Installed direct-chat recovery | One existing canonical reply was prepared without sending, claimed and deliberately abandoned, observed as leased after a Bjornheim AI restart, recovered after lease expiry, delivered once through Telegram on attempt 2 of 3, and recorded as succeeded. The extra transport delivery did not create another canonical message or disturb parity. | Pass |
 | Atomic assistant result and delivery request | `record_workshop_outbound_message` currently commits the canonical assistant message independently. `WorkshopDeliveryOutbox.request_delivery` starts a separate transaction, and production handlers still send directly. A crash between those operations could leave a canonical reply without durable delivery work. | Blocker |
 | Installed notification-group delivery | Canonical group binding and delivery behavior are covered by automated tests, but the installed qualification exercised only a direct chat. Existing GitHub notification-group behavior must remain unchanged. | Blocker before group cutover |
-| Production worker lifecycle | The worker has a tested stop-event loop but no Kai startup/shutdown owner, readiness signal, or installed graceful-shutdown evidence. This absence is intentional until atomic enqueue exists. | Blocker |
+| Production worker lifecycle | The worker has a tested stop-event loop but no Bjornheim AI startup/shutdown owner, readiness signal, or installed graceful-shutdown evidence. This absence is intentional until atomic enqueue exists. | Blocker |
 | Production transport coverage | The Workshop adapter currently delivers text. Existing direct paths also cover command responses, schedules, GitHub and generic webhooks, files, and voice. Each may move only through an explicit bounded cutover that preserves its supported behavior. | Partial |
 
 ### 19.1 Next bounded implementation milestone
@@ -561,9 +561,9 @@ The service remains production-unused. Next, separately qualify installed notifi
 
 ### 19.2 Installed notification-group qualification gate
 
-Effective negative Telegram notification destinations now bootstrap as distinct canonical `notification` channels. They reuse configured human principals and attach Kai, but the inbound recorder rejects the channel kind so an outbound destination cannot silently become an interactive group. This bootstrap is additive and does not change GitHub routing.
+Effective negative Telegram notification destinations now bootstrap as distinct canonical `notification` channels. They reuse configured human principals and attach Bjornheim AI, but the inbound recorder rejects the channel kind so an outbound destination cannot silently become an interactive group. This bootstrap is additive and does not change GitHub routing.
 
-The operator-only qualification command atomically creates one recognizable Kai-authored message in the selected notification channel and its pending text delivery. Preparation is deterministic and idempotent, accepts only a configured canonical negative Telegram destination, does not send, and cannot claim unrelated work. The existing exact-delivery `status`, `simulate-interruption`, and `run` actions remain the only ways to exercise it. Direct-chat JSONL parity excludes outbound-only notification channels while projection replay still covers their canonical facts.
+The operator-only qualification command atomically creates one recognizable Bjornheim AI-authored message in the selected notification channel and its pending text delivery. Preparation is deterministic and idempotent, accepts only a configured canonical negative Telegram destination, does not send, and cannot claim unrelated work. The existing exact-delivery `status`, `simulate-interruption`, and `run` actions remain the only ways to exercise it. Direct-chat JSONL parity excludes outbound-only notification channels while projection replay still covers their canonical facts.
 
 Installed evidence passed on 2026-08-12. The deployed bootstrap reported three Telegram bindings and six explicit channel memberships for two humans. Delivery `dlv_81b5d54eb64355eaad951e21105411fd` was prepared without sending, then delivered through the exact qualification action on attempt 1 of 3 and reached the configured Telegram group with the recognizable qualification text. The subsequent diagnostic remained clean at `canonical=39`, `projected=39`, zero replay mismatches, `JSONL matched=38`, zero missing or unmatched records, and one direct Telegram parity channel. A redelivered GitHub event then reached the same group through the unchanged legacy route.
 
@@ -573,7 +573,7 @@ Installed evidence passed on 2026-08-12. The deployed bootstrap reported three T
 
 **Scope:** Whether atomic assistant-result enqueue plus installed direct-chat and notification-group evidence are sufficient to register the Workshop Telegram worker or replace a production delivery path.
 
-**Decision:** **Hold worker registration and production routing cutover.** The canonical message/outbox transaction and both installed Telegram targets are now proven. The remaining blocker is ownership of the worker inside Kai's startup, readiness, fault, and graceful-shutdown lifecycle. Registering a bare task before that contract exists would make delivery authority depend on implicit task behavior and could conceal a dead worker behind an otherwise healthy service.
+**Decision:** **Hold worker registration and production routing cutover.** The canonical message/outbox transaction and both installed Telegram targets are now proven. The remaining blocker is ownership of the worker inside Bjornheim AI's startup, readiness, fault, and graceful-shutdown lifecycle. Registering a bare task before that contract exists would make delivery authority depend on implicit task behavior and could conceal a dead worker behind an otherwise healthy service.
 
 This decision also keeps transport coverage bounded. Direct Telegram sends remain authoritative for normal replies, schedules, GitHub and generic webhooks, files, and voice. The successful group qualification proves the Workshop transport target; it does not authorize moving GitHub routing or making a notification destination interactive.
 
@@ -584,7 +584,7 @@ This decision also keeps transport coverage bounded. Direct Telegram sends remai
 | Installed notification-group delivery | The effective negative destination bootstrapped as an outbound-only canonical channel. Its exact qualification delivery succeeded on attempt 1 of 3, reached Telegram, and preserved clean direct-chat parity. | Pass |
 | Existing GitHub notification behavior | A GitHub webhook redelivery reached the same configured Telegram group after the Workshop qualification, proving that the unchanged legacy route still works. | Pass |
 | Inbound isolation | Notification channels create no external identity and the inbound recorder rejects their channel kind. Automated tests cover the fail-closed boundary. | Pass |
-| Worker lifecycle ownership | The worker loop accepts a stop event, but Kai has no explicit owner for task creation, readiness, failure propagation, shutdown ordering, or installed lifecycle evidence. | Blocker |
+| Worker lifecycle ownership | The worker loop accepts a stop event, but Bjornheim AI has no explicit owner for task creation, readiness, failure propagation, shutdown ordering, or installed lifecycle evidence. | Blocker |
 | Production route coverage | No production path uses atomic enqueue and the worker remains unregistered. Non-text transport modes remain on their existing direct paths. | Partial by design |
 
 ### 20.1 Next bounded implementation milestone
@@ -593,7 +593,7 @@ The production-unused Telegram delivery runtime owner now wraps the existing wor
 
 - creates at most one worker task and exposes an explicit ready state;
 - recovers expired leases before reporting ready;
-- surfaces an unexpected worker exit or exception instead of silently leaving Kai healthy;
+- surfaces an unexpected worker exit or exception instead of silently leaving Bjornheim AI healthy;
 - stops new polling during shutdown and awaits the worker's current serialized iteration without cancelling an in-flight external send;
 - makes repeated or out-of-order start/stop calls deterministic;
 - remains uncalled by `main.py`, enqueues no production work, and preserves all direct Telegram behavior.
@@ -602,7 +602,7 @@ Automated contracts cover clean startup, recovery-before-ready ordering, duplica
 
 ### 20.2 Next bounded review
 
-Conduct a focused cutover review for one normal direct-chat text-reply path. The review must define how Kai's application lifecycle will supervise the owner and how one reply path will switch atomically from canonical result creation to durable delivery without double-sending. GitHub notification routing, schedules, files, and voice remain separate later cutovers.
+Conduct a focused cutover review for one normal direct-chat text-reply path. The review must define how Bjornheim AI's application lifecycle will supervise the owner and how one reply path will switch atomically from canonical result creation to durable delivery without double-sending. GitHub notification routing, schedules, files, and voice remain separate later cutovers.
 
 ## 21. Fourth canonical conversation authority review
 
@@ -621,7 +621,7 @@ The normal reply path is not a single final `send_message` call. `_handle_respon
 | Plain-text route isolation | `handle_message` is a distinct authenticated ingress, but `_handle_response` is also shared by photo, document, and voice paths and contains text, voice-only, and text-plus-voice delivery modes. | Partial; cutover eligibility must be an explicit typed input from the caller, never inferred from prompt shape or backend behavior |
 | Streaming finalization | A live Telegram message may already contain all or part of the final answer before canonical enqueue. The current outbox has no durable edit target or edit-fragment operation. | Blocker; a send-only worker would duplicate or abandon the live response |
 | Historical-work isolation | The worker currently claims every eligible Telegram text delivery. Existing qualification rows are intentionally production-unused but are not classified separately from future conversation replies. | Blocker; first production startup must not drain historical qualification work |
-| Database ownership | Canonical handler writes use Kai's initialized SQLite connection under the Workshop event lock. A continuously polling worker on that same connection could interleave transaction boundaries with handler work. | Blocker; the runtime needs its own opened Workshop store/connection and must close it after the worker stops |
+| Database ownership | Canonical handler writes use Bjornheim AI's initialized SQLite connection under the Workshop event lock. A continuously polling worker on that same connection could interleave transaction boundaries with handler work. | Blocker; the runtime needs its own opened Workshop store/connection and must close it after the worker stops |
 | Main-loop supervision and shutdown order | `main.py` currently blocks on an unrelated never-set event. The runtime's `wait()` can instead expose worker death to the existing fatal top-level error path. | Design ready, not wired; start must finish before updates are accepted, and shutdown must stop the worker before closing its store or Telegram client |
 | JSONL compatibility | JSONL remains the transcript/context authority and is written before current final delivery. Canonical-to-JSONL parity remains observable. | Preserve for this delivery cutover; transcript authority is a separate later review |
 | Rollback and old work | Disabling a worker while committed conversation deliveries remain non-terminal could cause a later reactivation to send an old reply. | Blocker; activation and rollback require explicit work classification and reconciliation diagnostics |
@@ -632,7 +632,7 @@ The normal reply path is not a single final `send_message` call. `_handle_respon
 - Installing the runtime-owner code does not exercise or qualify production lifecycle wiring.
 - Normal reply streaming, commands, media, voice, schedules, GitHub and generic webhooks, files, and notification-group routing remain unchanged.
 - A handler must never both enqueue an authoritative final reply and invoke the legacy final-send branch.
-- Worker failure after activation must make Kai unhealthy and trigger the existing process supervisor; it must not leave a loaded service silently unable to deliver.
+- Worker failure after activation must make Bjornheim AI unhealthy and trigger the existing process supervisor; it must not leave a loaded service silently unable to deliver.
 - Existing qualification work must not become eligible merely because the production worker starts.
 
 ### 21.2 Next bounded implementation milestone
@@ -750,7 +750,7 @@ and text work. It cannot claim qualification rows or `send_fragments` work; the
 existing worker remains unable to claim streaming-finalization rows.
 
 For an edit operation, the adapter uses the canonical binding's Telegram target
-and the persisted positive preview message ID. It applies Kai's Markdown-first,
+and the persisted positive preview message ID. It applies Bjornheim AI's Markdown-first,
 plain-text-fallback presentation behavior. Telegram's explicit "message is not
 modified" response confirms that the desired terminal snapshot already exists
 and completes the distinct edit operation. A deleted or uneditable target
@@ -817,7 +817,7 @@ could be delivered unexpectedly after a later restart or reactivation.
 | Live route eligibility | The authenticated plain-text handler is identifiable, but it shares `_handle_response` with media and voice. Eligibility must be passed explicitly with the canonical inbound ID and voice mode off. | Design ready; not wired |
 | Dedicated database ownership | A worker can open and own a separate `WorkshopEventStore` connection. Startup must finish recovery before webhook or polling ingress, and shutdown must stop ingress and the runtime before closing Telegram and database resources. | Design ready; not wired |
 | Historical-work ownership | Purpose and execution-contract filters do not record whether matching conversation work belongs to the current production authority period. | Blocker |
-| Rollback and reactivation | Kai cannot durably deactivate one authority period, prove its work reconciled, and prevent those rows from replaying during a later period. | Blocker |
+| Rollback and reactivation | Bjornheim AI cannot durably deactivate one authority period, prove its work reconciled, and prevent those rows from replaying during a later period. | Blocker |
 | Commit-outcome fallback | The atomic service rolls back ordinary failures, but the live adapter still needs to resolve deterministic state after a database exception. It may use the legacy final-send path only after proving that no authoritative finalization committed; an indeterminate outcome must fail closed with a bounded operational message. | Blocker for route wiring, after authority epochs |
 | Operator diagnostics | `install-status` reports bootstrap and transcript parity but no classified conversation-delivery readiness, active authority period, non-terminal work, terminal failures, or uncertain effects. | Blocker |
 | Installed qualification | Existing qualification proves durable Telegram send, restart recovery, and both direct and notification-group targets. Automated finalization tests prove edit semantics. Another send-only qualification would not prove handler eligibility, authority activation, or lifecycle wiring. | No additional installed qualification before the authority-epoch foundation; installed cutover evidence remains mandatory afterward |
@@ -833,7 +833,7 @@ could be delivered unexpectedly after a later restart or reactivation.
 - Commands, media, voice, text-plus-voice, schedules, GitHub and generic
   webhooks, files, and notification-group routing remain outside this cutover.
 - An individual terminal worker failure may be reported by aggregate
-  diagnostics without crashing Kai. Unexpected worker-loop termination must
+  diagnostics without crashing Bjornheim AI. Unexpected worker-loop termination must
   still make the service unhealthy.
 - Diagnostic and reconciliation output must contain counts and state names
   only. It must never expose message bodies, Telegram IDs, delivery IDs, lease
@@ -940,13 +940,13 @@ the first attempt or observes the already-committed identical state. If that
 resolution also fails, the outcome is classified as uncertain and the handler
 refuses direct fallback, returning only a bounded operational notice. A
 definite preview or finalization preparation error retains the current direct
-delivery path so an isolated canonical failure does not make Kai unusable.
+delivery path so an isolated canonical failure does not make Bjornheim AI unusable.
 
 ### 23.1 Rollback contract
 
 Rollback must not cross authority periods:
 
-1. stop Telegram ingress and the Kai service;
+1. stop Telegram ingress and the Bjornheim AI service;
 2. inspect `make install-status` and reconcile every active pending, leased,
    retrying, failed, or uncertain conversation delivery;
 3. run `python -m kai workshop delivery-authority deactivate` as the deployed
@@ -1125,13 +1125,13 @@ service and trusted-host backend processes.
 production-unused durable execution-attempt and cancellation-intent
 foundation.** The lifecycle vocabulary and projection are sound as durable
 facts, but the current handler cannot place those facts around a local coding
-agent without creating states that overclaim what Kai knows after a crash.
+agent without creating states that overclaim what Bjornheim AI knows after a crash.
 
 The blocker is not transport routing or Telegram final delivery. The durable
 Telegram update queue and exact-epoch outbox already provide useful recovery
 boundaries. The blocker is the non-transactional boundary between SQLite and a
 backend process that may edit files, invoke tools, or affect remote systems
-before Kai observes its first stream event. No database transaction can make
+before Bjornheim AI observes its first stream event. No database transaction can make
 that external execution exactly once.
 
 ### 27.1 Current authority trace
@@ -1188,7 +1188,7 @@ run facts exist. Activation requires these corrections:
   The attempt snapshots backend-neutral execution selection needed for audit
   (agent, registered backend, provider when applicable, model, and execution
   contract), but never credentials, executable paths, prompts, or output.
-- **Meaning of started:** `run.started` means Kai granted an attempt authority
+- **Meaning of started:** `run.started` means Bjornheim AI granted an attempt authority
   at the may-have-executed boundary. It does not claim that the first token was
   observed or that external effects are reversible.
 - **Durable cancellation intent:** a human cancellation request is a separate
@@ -1417,7 +1417,7 @@ run identity; it cannot supply a pool key, backend, provider, model, command,
 executable, environment, or credential.
 
 If the prepared runtime no longer matches the durable selection immediately
-before dispatch, Kai must abandon the pre-dispatch grant and allow expiry
+before dispatch, Bjornheim AI must abandon the pre-dispatch grant and allow expiry
 recovery before preparing a new higher-fenced attempt. It must not silently
 change the selection attached to an active attempt.
 
@@ -1520,7 +1520,7 @@ The authoritative form must resolve the active run in the canonical
 channel/agent lane, commit `run.cancellation_requested`, and then signal the
 live owner associated with the exact claim. Only that owner may confirm
 `run.cancelled`, and only after backend shutdown is known to have completed.
-If Kai loses the owner or cannot prove shutdown, lease recovery records
+If Bjornheim AI loses the owner or cannot prove shutdown, lease recovery records
 `execution_interrupted` rather than falsely claiming cancellation. A late stop
 against a terminal run is an idempotent no-op and cannot replace completion.
 
@@ -1788,9 +1788,9 @@ backend, alter Telegram delivery, or replace any JSONL reader.
 
 The installed event-stream gate passed on 2026-08-13 with a disposable client.
 The client handed off from timeline position 175, observed the human message at
-position 180 and Kai reply at position 185 exactly once, restarted Kai, and
+position 180 and Bjornheim AI reply at position 185 exactly once, restarted Bjornheim AI, and
 resumed from event 185 without replay. It then observed the later human message
-at position 190 and Kai reply at position 195 exactly once. Revoking the device
+at position 190 and Bjornheim AI reply at position 195 exactly once. Revoking the device
 caused both timeline access and a new event-stream connection to return HTTP
 401. The disposable credential was not retained.
 
@@ -1844,7 +1844,7 @@ theme selection, command submission, threads, approvals, projects, or desktop
 packaging.
 
 Node is a development and CI dependency only. Vite emits committed, prebuilt
-assets that remain ordinary Python package data, so an installed Kai host does
+assets that remain ordinary Python package data, so an installed Bjornheim AI host does
 not need Node. CI type-checks and tests the source, rebuilds the client, and
 fails if the committed assets differ.
 
@@ -1967,7 +1967,7 @@ Workshop identity model.
 
 **Implementation date:** 2026-08-13
 
-Browser command submission now ends when Kai has durably accepted the canonical
+Browser command submission now ends when Bjornheim AI has durably accepted the canonical
 message and run. It returns HTTP 202 with the typed run state instead of making
 the request own a potentially long backend execution. A process-level Workshop
 executor holds strong references to accepted browser tasks, reconciles accepted
@@ -2026,7 +2026,7 @@ field authority migration.
 
 **Implementation date:** 2026-08-14
 
-Kai now constructs and supervises the subprocess pool, protected runtime
+Bjornheim AI now constructs and supervises the subprocess pool, protected runtime
 facade, canonical conversation-run service, durable private-text executor,
 Workshop browser command executor, and browser-facing event store through a
 typed `KaiApplicationHost`. The host imports no Telegram package and exposes a
@@ -2080,7 +2080,7 @@ preserving the existing hybrid configuration.
 
 **Implementation date:** 2026-08-14
 
-Kai now records the enabled human-facing clients as explicit installation
+Bjornheim AI now records the enabled human-facing clients as explicit installation
 policy. `hybrid`, `workshop-only`, and `telegram-only` wizard choices become a
 validated `KAI_ENABLED_ADAPTERS` set. An older installation without the key
 continues in hybrid mode; the compatibility default can be removed after

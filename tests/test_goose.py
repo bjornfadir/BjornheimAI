@@ -216,7 +216,7 @@ class TestModelMapping:
 
 
 class TestProviderTranslation:
-    """`goose_provider_id` maps Kai provider keys to goose's wire-level
+    """`goose_provider_id` maps Bjornheim AI provider keys to goose's wire-level
     provider names; everything without a mapping passes through."""
 
     def test_deepseek_maps_to_custom_deepseek(self):
@@ -412,7 +412,7 @@ class TestHandshake:
         to call; without it, session/new fails with "Internal error" on
         any fresh install that has no provider configured in
         ~/.config/goose/config.yaml. This test guards the translation
-        from Kai's self.provider field to the goose-prefixed env var.
+        from Bjornheim AI's self.provider field to the goose-prefixed env var.
         """
         g = _make_goose(model="gpt-5.4-mini", provider="openai")
         proc = _make_mock_proc(_handshake_lines())
@@ -426,7 +426,7 @@ class TestHandshake:
     @pytest.mark.asyncio
     async def test_deepseek_provider_translated_to_wire_name(self):
         """
-        Kai's "deepseek" key becomes goose's "custom_deepseek" wire
+        Bjornheim AI's "deepseek" key becomes goose's "custom_deepseek" wire
         name in GOOSE_PROVIDER. Goose ships DeepSeek as a declarative
         provider under that name and rejects the bare key with
         "Unknown provider: deepseek" before any API call.

@@ -1,4 +1,4 @@
-"""Canonical principal authorization policies for Kai Workshop."""
+"""Canonical principal authorization policies for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 

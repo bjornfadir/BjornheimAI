@@ -1,4 +1,4 @@
-"""Core, transport-independent value objects for Kai Workshop."""
+"""Core, transport-independent value objects for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 

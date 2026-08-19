@@ -1,6 +1,6 @@
 # Changelog
 
-This file records the notable operator-facing changes in each Kai release.
+This file records the notable operator-facing changes in each Kai release. Entries below predate this fork's rebrand to "Bjornheim AI" and are left as the original historical record from upstream (dcellison/kai).
 
 ## [2.0.0] - 2026-08-11
 

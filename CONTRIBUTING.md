@@ -1,11 +1,11 @@
-# Contributing to Kai
+# Contributing to Bjornheim AI
 
-Thanks for your interest in contributing to Kai. This document covers
+Thanks for your interest in contributing to Bjornheim AI. This document covers
 how the project accepts contributions and what to expect.
 
 ## How to Contribute
 
-**Pull requests are currently restricted to collaborators.** Kai's
+**Pull requests are currently restricted to collaborators.** Bjornheim AI's
 architecture is evolving quickly and all implementation is handled
 internally to keep the codebase coherent. This will open up as the
 project stabilizes - check back or watch the repo for updates.
@@ -24,7 +24,7 @@ something to work with.
 
 ## Development Setup
 
-If you want to run Kai locally (for testing, exploring, or preparing a
+If you want to run Bjornheim AI locally (for testing, exploring, or preparing a
 future contribution):
 
 ```bash
@@ -43,7 +43,7 @@ make test           # pytest
 ```
 
 Requires **Python 3.13+** and **Node.js 22+** for development. An installed
-Kai uses the committed prebuilt Workshop assets and does not require Node. See the
+Bjornheim AI uses the committed prebuilt Workshop assets and does not require Node. See the
 [Getting Started](https://github.com/dcellison/kai/wiki/Getting-Started)
 wiki page for full setup instructions including `.env` configuration.
 
@@ -80,7 +80,7 @@ requests with required CI checks.
    make check && make client-check && make test
    ```
 
-5. **Expect an automated review.** Kai runs a PR Review Agent that
+5. **Expect an automated review.** Bjornheim AI runs a PR Review Agent that
    posts a code review comment on every push. It checks for bugs,
    security issues, missing error handling, and style violations. If
    you reference a spec file (add `spec: path/to/spec.md` in the PR
@@ -150,7 +150,7 @@ incrementally as modules are cleaned up.
 
 ### Security
 
-Kai exposes a webhook server and API endpoints. Changes that touch
+Bjornheim AI exposes a webhook server and API endpoints. Changes that touch
 networking, file I/O, or process execution follow these rules:
 
 - **Path confinement:** `Path.relative_to()` for directory containment

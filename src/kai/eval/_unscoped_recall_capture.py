@@ -172,7 +172,7 @@ async def legacy_retrieve_hits(question: str, user_id: str) -> tuple[list[dict[s
     Args:
         question: The probe question text. Passed verbatim to
             `kai.memory.format_context`.
-        user_id: Kai user id (Telegram chat id as a string for
+        user_id: Bjornheim AI user id (Telegram chat id as a string for
             production callers). Scopes the recall to one user.
 
     Returns:

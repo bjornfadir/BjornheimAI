@@ -109,7 +109,7 @@ class TestCanonicalTimelineQuery:
 
             assert [message.body for message in page.messages] == ["Question", "Answer"]
             assert [message.author_kind for message in page.messages] == ["human", "agent"]
-            assert [message.author_display_name for message in page.messages] == ["User One", "Kai"]
+            assert [message.author_display_name for message in page.messages] == ["User One", "Bjornheim AI"]
             assert page.messages[1].reply_to_message_id == page.messages[0].message_id
             assert all(message.channel_id == channel_id for message in page.messages)
             assert [message.event_position for message in page.messages] == sorted(

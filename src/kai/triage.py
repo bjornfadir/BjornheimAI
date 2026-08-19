@@ -56,7 +56,7 @@ _TRIAGE_TIMEOUT = 300
 
 # Header prepended to every triage comment on GitHub. Distinguishes
 # automated triage from human comments.
-_TRIAGE_HEADER = "## Triage by Kai\n\n"
+_TRIAGE_HEADER = "## Triage by Bjornheim AI\n\n"
 
 
 def _github_cli_env(github_token: str | None = None) -> dict[str, str] | None:
@@ -418,7 +418,7 @@ def build_triage_prompt(
         "- next_action describes what the MAINTAINER should do. Maintainer-driven close, "
         "assign, label, and milestone recommendations are fine and often the right answer "
         "(close as duplicate, close as wontfix, apply a needs-info label after asking the "
-        "reporter). Do NOT claim Kai will perform any of these automatically; Kai's mutation "
+        "reporter). Do NOT claim Bjornheim AI will perform any of these automatically; Bjornheim AI's mutation "
         "surface is additive labels, optional project assignment, the triage comment, and the "
         "Telegram notification, full stop.",
         "",

@@ -697,7 +697,7 @@ def _verify_github_signature(secret: str, body: bytes, signature: str) -> bool:
     comparison to prevent timing attacks.
 
     Args:
-        secret: The dedicated GITHUB_WEBHOOK_SECRET configured in GitHub and Kai.
+        secret: The dedicated GITHUB_WEBHOOK_SECRET configured in GitHub and Bjornheim AI.
         body: The raw request body bytes.
         signature: The X-Hub-Signature-256 header value (e.g., "sha256=abc123...").
 
@@ -861,6 +861,10 @@ async def _get_subscribed_users(config: Config, repo_full_name: str) -> list[Use
     admin_wildcards: list[UserConfig] = []
 
     for uc in config.user_configs.values():
+        if uc.telegram_id is None:
+            # GitHub notification routing is Telegram-only for now; a
+            # Discord-only user has no chat_id to route these into.
+            continue
         # Compute effective repos: yaml baseline + DB-added - DB-removed.
         effective = await sessions.get_effective_repos(uc.telegram_id, uc.github_repos)
 
@@ -2614,19 +2618,27 @@ async def start(
     # Internal API calls never use this value for identity; their credential
     # resolves a principal before the handler runs.
     if telegram_enabled:
-        admins = config.get_admins()
-        if admins:
-            _app[CHAT_ID_KEY] = admins[0].telegram_id
+        telegram_admins = [a for a in config.get_admins() if a.telegram_id is not None]
+        if telegram_admins:
+            _app[CHAT_ID_KEY] = telegram_admins[0].telegram_id
         else:
-            fallback = next(iter(config.user_configs.values()))
-            log.warning(
-                "No admin users defined in users.yaml; using %s "
-                "(telegram_id: %d) as default webhook target. "
-                "External notifications may route unexpectedly.",
-                fallback.name,
-                fallback.telegram_id,
-            )
-            _app[CHAT_ID_KEY] = fallback.telegram_id
+            telegram_users = [u for u in config.user_configs.values() if u.telegram_id is not None]
+            if telegram_users:
+                fallback = telegram_users[0]
+                log.warning(
+                    "No Telegram admin users defined in users.yaml; using %s "
+                    "(telegram_id: %d) as default webhook target. "
+                    "External notifications may route unexpectedly.",
+                    fallback.name,
+                    fallback.telegram_id,
+                )
+                _app[CHAT_ID_KEY] = fallback.telegram_id
+            else:
+                log.warning(
+                    "Telegram adapter is enabled but no configured user has a "
+                    "telegram_id; unattributed external webhook events have no "
+                    "fallback destination."
+                )
 
     # Keep notification destinations separate from Config.allowed_user_ids,
     # which is the immutable-at-runtime source for Telegram inbound auth. The
@@ -2717,7 +2729,7 @@ async def start(
     # Register the webhook URL with Telegram's API if in webhook mode. This must
     # come after the server is listening so the endpoint is ready before Telegram
     # starts pushing. allowed_updates limits which update types Telegram sends -
-    # Kai only handles messages and callback queries (inline keyboard taps).
+    # Bjornheim AI only handles messages and callback queries (inline keyboard taps).
     #
     # Retry with backoff because Telegram's API can time out transiently,
     # especially after a period of downtime when queued updates are flushing.

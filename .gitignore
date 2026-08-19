@@ -26,11 +26,15 @@ build/
 # Runtime artifacts
 .kai-backup/
 kai.db
+kai.db-shm
+kai.db-wal
+kai.db.bak-*
 logs/
 history/
 memory/
 preferences/
 files/
+home/
 .responding_to
 models/
 install.conf

@@ -36,7 +36,7 @@ class TestWorkshopClientShell:
             assert response.headers["Referrer-Policy"] == "no-referrer"
             assert response.headers["X-Content-Type-Options"] == "nosniff"
             assert response.headers["X-Frame-Options"] == "DENY"
-            assert "Kai Workshop" in body
+            assert "Bjornheim AI Workshop" in body
             assert '<div id="root"></div>' in body
             assert '<script type="module" crossorigin src="/workshop/app.js"></script>' in body
             assert 'href="/workshop/app.css"' in body

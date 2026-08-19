@@ -1,5 +1,5 @@
 """
-Evaluation package for the Kai memory pipeline.
+Evaluation package for the Bjornheim AI memory pipeline.
 
 Currently houses Layer 1 only (`retrieval`): precision / recall / MRR
 on a probe set scored against the live `format_context` log line.

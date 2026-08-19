@@ -6,7 +6,7 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) {
-  throw new Error("Kai Workshop root element is unavailable");
+  throw new Error("Bjornheim AI Workshop root element is unavailable");
 }
 
 createRoot(root).render(

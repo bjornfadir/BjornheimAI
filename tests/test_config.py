@@ -2661,7 +2661,7 @@ class TestModelRegistry:
         persist through model resolution and reach
         OPENCODE_CONFIG_CONTENT='{"model": "sonnet"}' where the
         opencode handshake rejects it as an unknown provider/model,
-        with no Kai-side pointer back to the registry typo.
+        with no Bjornheim AI-side pointer back to the registry typo.
         """
         monkeypatch.setitem(MODEL_REGISTRY, ("opencode", "anthropic", ModelRole.BEHAVIORAL_JUDGE), "sonnet")
         with pytest.raises(SystemExit) as excinfo:
@@ -3052,7 +3052,7 @@ class TestValidateModelForBackend:
         bare Anthropic name typed into /model on an opencode install
         would otherwise persist as OPENCODE_CONFIG_CONTENT='{"model":
         "opus"}' and fail at handshake without pointing back to the
-        Kai-side typo.
+        Bjornheim AI-side typo.
         """
         from kai.config import validate_model_for_backend
 
@@ -3143,7 +3143,7 @@ class TestValidBackends:
         the (backend, provider, role) registry lookup). The API-key
         sub-prompt is suppressed for opencode in install.py because
         opencode auth is managed by `opencode auth login`, not by
-        Kai."""
+        Bjornheim AI."""
         from kai.config import BACKEND_PROVIDERS, BACKENDS_NEEDING_PROVIDER_PROMPT
 
         assert "opencode" in BACKEND_PROVIDERS
@@ -4381,3 +4381,104 @@ class TestLegacyEnvOverrideSeeding:
         uc = UserConfig(telegram_id=1, name="test")
         out = _apply_legacy_model_env_overrides({1: uc}, "claude")
         assert out[1].models is None
+
+
+class TestDiscordIdUserConfig:
+    """Parse discord_id from per-user users.yaml entries.
+
+    A user needs at least one of telegram_id/discord_id (previously
+    telegram_id was unconditionally required); each is independently
+    optional, each must be unique across entries, and UserConfig.config_id
+    resolves to whichever one is the canonical dict key.
+    """
+
+    def _load_with_yaml(self, monkeypatch, users_data):
+        from kai.config import _load_user_configs
+
+        monkeypatch.setattr("kai.config._read_protected_yaml", lambda _name: users_data)
+        return _load_user_configs(global_backend="claude", global_llm_provider="anthropic")
+
+    def test_discord_only_user_is_accepted(self, monkeypatch):
+        users_data = {"users": [{"discord_id": 555, "name": "tali"}]}
+        configs = self._load_with_yaml(monkeypatch, users_data)
+        assert configs is not None
+        assert configs[555].discord_id == 555
+        assert configs[555].telegram_id is None
+        assert configs[555].config_id == 555
+
+    def test_telegram_only_user_unaffected(self, monkeypatch):
+        users_data = {"users": [{"telegram_id": 123, "name": "alice"}]}
+        configs = self._load_with_yaml(monkeypatch, users_data)
+        assert configs is not None
+        assert configs[123].telegram_id == 123
+        assert configs[123].discord_id is None
+        assert configs[123].config_id == 123
+
+    def test_hybrid_user_keyed_by_telegram_id(self, monkeypatch):
+        """telegram_id wins as the canonical config_id when both are set."""
+        users_data = {"users": [{"telegram_id": 123, "discord_id": 555, "name": "alice"}]}
+        configs = self._load_with_yaml(monkeypatch, users_data)
+        assert configs is not None
+        assert set(configs.keys()) == {123}
+        assert configs[123].discord_id == 555
+
+    def test_entry_without_either_id_is_skipped(self, monkeypatch, caplog):
+        users_data = {
+            "users": [
+                {"name": "nobody"},
+                {"telegram_id": 123, "name": "alice"},
+            ],
+        }
+        with caplog.at_level(logging.WARNING):
+            configs = self._load_with_yaml(monkeypatch, users_data)
+        assert configs is not None
+        assert list(configs.keys()) == [123]
+        assert "without telegram_id or discord_id" in caplog.text
+
+    def test_duplicate_discord_id_uses_first(self, monkeypatch, caplog):
+        users_data = {
+            "users": [
+                {"discord_id": 555, "name": "first"},
+                {"discord_id": 555, "name": "second"},
+            ],
+        }
+        with caplog.at_level(logging.WARNING):
+            configs = self._load_with_yaml(monkeypatch, users_data)
+        assert configs is not None
+        assert configs[555].name == "first"
+        assert "duplicate discord_id" in caplog.text
+
+    def test_invalid_discord_id_skips_entry(self, monkeypatch, caplog):
+        """The entry is rejected; with no other valid entries, load fails
+        closed (matches _load_user_configs' documented no-fallback contract)."""
+        users_data = {"users": [{"discord_id": -5, "name": "bad"}]}
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(SystemExit, match="no valid user entries"):
+                self._load_with_yaml(monkeypatch, users_data)
+        assert "invalid discord_id" in caplog.text
+
+    def test_config_id_property_asserts_when_both_none(self):
+        uc = object.__new__(UserConfig)
+        object.__setattr__(uc, "telegram_id", None)
+        object.__setattr__(uc, "discord_id", None)
+        with pytest.raises(AssertionError):
+            _ = uc.config_id
+
+
+class TestConfigDiscordAdapterGating:
+    """discord_enabled / DISCORD_BOT_TOKEN mirror the Telegram equivalents."""
+
+    def test_discord_not_enabled_by_default(self, monkeypatch, tmp_path):
+        """KAI_ENABLED_ADAPTERS absence must NOT silently enable discord -
+        every existing install without a DISCORD_BOT_TOKEN would otherwise
+        start failing at startup on upgrade."""
+        from kai.config import DEFAULT_CLIENT_ADAPTERS
+
+        assert "discord" not in DEFAULT_CLIENT_ADAPTERS
+        assert "telegram" in DEFAULT_CLIENT_ADAPTERS
+        assert "workshop" in DEFAULT_CLIENT_ADAPTERS
+
+    def test_discord_enabled_without_token_raises(self, monkeypatch):
+        from kai.config import parse_enabled_adapters
+
+        assert parse_enabled_adapters("discord,workshop") == frozenset({"discord", "workshop"})

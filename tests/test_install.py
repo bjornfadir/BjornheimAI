@@ -350,7 +350,7 @@ class TestGenerateUsersYaml:
     def test_includes_header_comment(self):
         """Generated file starts with a header comment."""
         content = _generate_users_yaml("123", "test")
-        assert content.startswith("# Kai user configuration")
+        assert content.startswith("# Bjornheim AI user configuration")
 
     def test_trailing_newline(self):
         """Generated file ends with a trailing newline."""
@@ -1456,7 +1456,7 @@ class TestCmdConfig:
         )
         monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
 
-        with pytest.raises(SystemExit, match="No installed Kai backends were found"):
+        with pytest.raises(SystemExit, match="No installed Bjornheim AI backends were found"):
             _cmd_config()
 
     def test_writes_install_conf(self, tmp_path, monkeypatch):
@@ -7999,7 +7999,7 @@ class TestApplyMigrateManagedIdentity:
     def _write_users_yaml(self, path: Path, entries: list[dict]) -> None:
         path.write_text(yaml.safe_dump({"users": entries}))
 
-    def _source(self, tmp_path: Path, *, identity: str | None = "# Kai template\n") -> Path:
+    def _source(self, tmp_path: Path, *, identity: str | None = "# Bjornheim AI template\n") -> Path:
         src = tmp_path / "source"
         templates = src / "templates"
         claude_templates = templates / ".claude"
@@ -8025,7 +8025,7 @@ class TestApplyMigrateManagedIdentity:
         backend: str,
         entry_backend: str | None = None,
         dry_run: bool = False,
-        source_identity: str | None = "# Kai template\n",
+        source_identity: str | None = "# Bjornheim AI template\n",
     ) -> tuple[Path, Path, Path]:
         src = self._source(tmp_path, identity=source_identity)
         users_yaml = tmp_path / "users.yaml"
@@ -8056,7 +8056,7 @@ class TestApplyMigrateManagedIdentity:
 
     def test_fresh_claude_user_gets_agents_and_thin_adapter(self, tmp_path):
         home, _users, _src = self._apply(tmp_path, backend="claude")
-        assert (home / "AGENTS.md").read_text() == "# Kai template\n"
+        assert (home / "AGENTS.md").read_text() == "# Bjornheim AI template\n"
         assert (home / ".claude" / "CLAUDE.md").read_text() == "@../AGENTS.md\n"
         assert stat.S_IMODE((home / "AGENTS.md").stat().st_mode) == 0o600
         assert stat.S_IMODE((home / ".claude" / "CLAUDE.md").stat().st_mode) == 0o600
@@ -8064,7 +8064,7 @@ class TestApplyMigrateManagedIdentity:
     @pytest.mark.parametrize("backend", ["codex", "goose", "opencode", "pi"])
     def test_fresh_non_claude_user_gets_only_agents(self, tmp_path, backend):
         home, _users, _src = self._apply(tmp_path, backend=backend)
-        assert (home / "AGENTS.md").read_text() == "# Kai template\n"
+        assert (home / "AGENTS.md").read_text() == "# Bjornheim AI template\n"
         assert not (home / ".claude" / "CLAUDE.md").exists()
 
     def test_explicit_user_backend_overrides_install_default(self, tmp_path):
@@ -11052,7 +11052,7 @@ class TestApplyMigratePerOsUserTmpdir:
         """Seed the templates the rest of _apply_migrate consumes."""
         ws_claude = src / "templates" / ".claude"
         ws_claude.mkdir(parents=True)
-        (ws_claude / "CLAUDE.md").write_text("# Kai\n")
+        (ws_claude / "CLAUDE.md").write_text("# Bjornheim AI\n")
         (ws_claude / "MEMORY.md").write_text("# Memory\n")
         (ws_claude / "PREFERENCES.md").write_text("# Preferences\n")
 

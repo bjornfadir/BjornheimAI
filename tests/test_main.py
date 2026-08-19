@@ -496,7 +496,7 @@ class TestStartCrashExit:
             _start()
 
         assert excinfo.value.code == 1
-        assert any(r.levelno == logging.ERROR and "Kai crashed" in r.getMessage() for r in caplog.records)
+        assert any(r.levelno == logging.ERROR and "Bjornheim AI crashed" in r.getMessage() for r in caplog.records)
 
     def test_empty_protected_services_yaml_disables_services_without_local_fallback(self, monkeypatch):
         """An empty readable /etc/kai/services.yaml is authoritative.

@@ -1,4 +1,4 @@
-"""Canonical GitHub notification recording for Kai Workshop."""
+"""Canonical GitHub notification recording for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 

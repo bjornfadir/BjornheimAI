@@ -254,7 +254,7 @@ class WorkshopRuntimeProfileRegistry:
         """
         profiles: list[ProtectedRuntimeProfile] = []
         for runtime_config_id, user in sorted(config.user_configs.items()):
-            if user.telegram_id != runtime_config_id:
+            if user.config_id != runtime_config_id:
                 raise WorkshopRuntimeProfileError("Configured-user key does not match its protected user record")
             backend, provider = get_user_backend_and_provider(user, config)
             profiles.append(
@@ -415,7 +415,7 @@ class WorkshopRuntimeProfileRegistry:
                 service_user = pwd.getpwuid(service_uid).pw_name
             except KeyError:
                 raise WorkshopRuntimeProfileError(
-                    f"Protected installation could not resolve the Kai service account for effective uid {service_uid}"
+                    f"Protected installation could not resolve the Bjornheim AI service account for effective uid {service_uid}"
                 ) from None
             registry.validate_protected_os_users(
                 service_user,

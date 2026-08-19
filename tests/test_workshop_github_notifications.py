@@ -106,7 +106,7 @@ class TestWorkshopGitHubNotificationRecorder:
                 assert tuple(await cursor.fetchone()) == (
                     "notification",
                     _notification().body,
-                    "Kai",
+                    "Bjornheim AI",
                 )
         finally:
             await store.close()

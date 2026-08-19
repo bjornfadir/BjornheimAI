@@ -171,7 +171,7 @@ def fake_memory_md(tmp_path):
         "## Projects\n\n"
         "Projects body.\n\n"
         "### Phi\nShort entry.\n\n"
-        f"### Kai\n{long_body}\n"
+        f"### Bjornheim AI\n{long_body}\n"
     )
     path = tmp_path / "MEMORY.md"
     path.write_text(content)

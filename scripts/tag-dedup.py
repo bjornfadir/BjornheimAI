@@ -15,7 +15,7 @@ Three near-duplicate classes ship in this version:
 Default mode is dry-run. The `--apply` flag is required to write. Per-user
 scope by default; `--all-users` opts in to cross-user iteration over
 `config.allowed_user_ids` (the DM-mode assumption that user_id == chat_id
-holds for typical Kai installs; group-chat installs would need a
+holds for typical Bjornheim AI installs; group-chat installs would need a
 chat-id-keyed iteration source).
 
 `confirmed_action` is structurally significant in the extractor pipeline.

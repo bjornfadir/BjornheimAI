@@ -159,7 +159,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "If set, attach an INFO-level FileHandler to the root logger "
-            "so structured Kai log lines (memory.consolidate.intent, "
+            "so structured Bjornheim AI log lines (memory.consolidate.intent, "
             "memory.extract:, etc.) are captured. Without this flag the "
             "replay only writes its preamble and summary to stderr; the "
             "per-fact intent log (dropped_duplicate fires, update_of "

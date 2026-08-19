@@ -47,14 +47,14 @@ const navigation: WorkshopNavigation = {
     {
       channels: [
         {
-          agents: [{ agentId: "agt_00000000000000000000000000000001", name: "Kai" }],
+          agents: [{ agentId: "agt_00000000000000000000000000000001", name: "Bjornheim AI" }],
           canSubmitCommands: true,
           channelId,
           kind: "direct",
           name: "Conversation",
           participants: [
             {
-              displayName: "Kai",
+              displayName: "Bjornheim AI",
               kind: "agent",
               principalId: "prn_00000000000000000000000000000002",
             },
@@ -62,14 +62,14 @@ const navigation: WorkshopNavigation = {
           role: "owner",
         },
         {
-          agents: [{ agentId: "agt_00000000000000000000000000000001", name: "Kai" }],
+          agents: [{ agentId: "agt_00000000000000000000000000000001", name: "Bjornheim AI" }],
           canSubmitCommands: false,
           channelId: notificationChannelId,
           kind: "notification",
           name: "GitHub notifications",
           participants: [
             {
-              displayName: "Kai",
+              displayName: "Bjornheim AI",
               kind: "agent",
               principalId: "prn_00000000000000000000000000000002",
             },
@@ -92,14 +92,14 @@ const navigation: WorkshopNavigation = {
           role: "owner",
         },
       ],
-      name: "Kai Workshop",
+      name: "Bjornheim AI Workshop",
       role: "admin",
       workshopId: "wsp_00000000000000000000000000000001",
     },
   ],
 };
 const historyMessage: TimelineMessage = {
-  authorDisplayName: "Kai",
+  authorDisplayName: "Bjornheim AI",
   authorKind: "agent",
   body: "Canonical history is ready.",
   channelId,
@@ -177,7 +177,7 @@ describe("Workshop React client", () => {
     const navigationPanel = screen.getByLabelText("Workshop navigation");
     expect(navigationPanel).toBeVisible();
     expect(navigationPanel.querySelector(".sidebar-title")).toHaveTextContent(
-      /^Kai Workshop$/,
+      /^Bjornheim AI Workshop$/,
     );
     expect(
       navigationPanel.querySelector(".sidebar-title .overline"),
@@ -276,7 +276,7 @@ describe("Workshop React client", () => {
     ).toBeNull();
 
     scrollHeight = 1300;
-    await user.type(screen.getByLabelText("Message Kai"), "Show activity");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Show activity");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByLabelText("Agent run activity")).toBeVisible();
     await waitFor(() => expect(timeline.scrollTop).toBe(1300));
@@ -378,7 +378,7 @@ describe("Workshop React client", () => {
     render(<App />);
 
     expect(await screen.findByText(`History for ${channelId}`)).toBeVisible();
-    await user.type(screen.getByLabelText("Message Kai"), "Keep this draft");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Keep this draft");
     await user.click(
       screen.getByRole("button", { name: /GitHub notifications/ }),
     );
@@ -389,15 +389,15 @@ describe("Workshop React client", () => {
     expect(screen.getByText("GitHub")).toBeVisible();
     expect(screen.getByText("Durable notification feed")).toBeVisible();
     expect(document.querySelector(".notification-row")).not.toBeNull();
-    expect(screen.queryByLabelText("Message Kai")).toBeNull();
+    expect(screen.queryByLabelText("Message Bjornheim AI")).toBeNull();
     expect(screen.getByText(/outbound-only/)).toBeVisible();
     expect(sessionStorage.getItem("kai.workshop.read-session.v1")).toContain(
       notificationChannelId,
     );
 
-    await user.click(screen.getByRole("button", { name: "Kai" }));
+    await user.click(screen.getByRole("button", { name: "Bjornheim AI" }));
     expect(await screen.findByText(`History for ${channelId}`)).toBeVisible();
-    expect(screen.getByLabelText("Message Kai")).toHaveValue("Keep this draft");
+    expect(screen.getByLabelText("Message Bjornheim AI")).toHaveValue("Keep this draft");
     expect(redeemEnrollment).not.toHaveBeenCalled();
   });
 
@@ -420,7 +420,7 @@ describe("Workshop React client", () => {
 
     expect(await screen.findByText("Canonical history is ready.")).toBeVisible();
     expect(screen.getByText("Direct messages")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Kai" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Bjornheim AI" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Scott" })).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Scott" }));
@@ -449,7 +449,7 @@ describe("Workshop React client", () => {
     await user.click(screen.getByRole("button", { name: "Collapse navigation" }));
 
     expect(navigationPanel).toHaveClass("collapsed");
-    expect(screen.getByRole("button", { name: "Kai" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Bjornheim AI" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Scott" })).toBeVisible();
     expect(sessionStorage.getItem("kai.workshop.sidebar-layout.v1")).toContain(
       '"collapsed":true',
@@ -497,7 +497,7 @@ describe("Workshop React client", () => {
     render(<App />);
     expect(await screen.findByText("Canonical history is ready.")).toBeVisible();
 
-    await user.type(screen.getByLabelText("Message Kai"), "Hello from Workshop");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Hello from Workshop");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Backend temporarily unavailable.",
@@ -514,7 +514,7 @@ describe("Workshop React client", () => {
       vi.mocked(submitCommand).mock.calls[0],
     );
     expect(getRandomValues).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText("Message Kai")).toHaveValue("");
+    expect(screen.getByLabelText("Message Bjornheim AI")).toHaveValue("");
   });
 
   it("accepts work asynchronously and exposes an exact run Stop control", async () => {
@@ -545,11 +545,11 @@ describe("Workshop React client", () => {
     render(<App />);
     expect(await screen.findByText("Canonical history is ready.")).toBeVisible();
 
-    await user.type(screen.getByLabelText("Message Kai"), "Take your time");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Take your time");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     expect(await screen.findByText("accepted")).toBeVisible();
-    expect(screen.getByLabelText("Message Kai")).toHaveValue("");
+    expect(screen.getByLabelText("Message Bjornheim AI")).toHaveValue("");
     await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(await screen.findByText("cancelled")).toBeVisible();
     expect(cancelRun).toHaveBeenCalledWith(
@@ -579,7 +579,7 @@ describe("Workshop React client", () => {
     render(<App />);
     expect(await screen.findByText("Canonical history is ready.")).toBeVisible();
 
-    await user.type(screen.getByLabelText("Message Kai"), "Inspect the event stream");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Inspect the event stream");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("Queued for the configured agent.")).toBeVisible();
 
@@ -642,7 +642,7 @@ describe("Workshop React client", () => {
     render(<App />);
     expect(await screen.findByText("Canonical history is ready.")).toBeVisible();
 
-    await user.type(screen.getByLabelText("Message Kai"), "Finish very quickly");
+    await user.type(screen.getByLabelText("Message Bjornheim AI"), "Finish very quickly");
     const submitting = user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(submitCommand).toHaveBeenCalledOnce());
     act(() =>

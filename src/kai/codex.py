@@ -33,7 +33,7 @@ break the conversational stream. The codex CLI version is captured
 in install metadata so a bump triggers a re-pin pass.
 
 This module does NOT depend on OpenAI's Codex Python SDK; the wire
-protocol is implemented directly to keep Kai's release schedule
+protocol is implemented directly to keep Bjornheim AI's release schedule
 decoupled from a vendor SDK's versioning.
 """
 
@@ -79,7 +79,7 @@ log = logging.getLogger(__name__)
 # "gpt-5.4-mini", etc.). No logical-name remapping is needed at this
 # layer, unlike goose.py which translates "sonnet" / "opus" / "haiku"
 # to claude-sonnet-4-6 etc for the Anthropic case.
-# If a future codex version accepts a Kai-internal alias, add a map
+# If a future codex version accepts a Bjornheim AI-internal alias, add a map
 # here and apply it before setting CODEX_MODEL on the subprocess env.
 
 
@@ -112,9 +112,9 @@ def _resolve_default_codex_bin() -> str:
 def _grant_turn_image_read_access(path: Path, reader_user: str) -> None:
     """Grant exactly one cross-OS-user reader access to a private image.
 
-    Kai owns the freshly created file and keeps its POSIX mode at ``0600``.
+    Bjornheim AI owns the freshly created file and keeps its POSIX mode at ``0600``.
     A named ACL gives the isolated Codex OS user read-only access without
-    making the image readable to every local account or granting Kai a broader
+    making the image readable to every local account or granting Bjornheim AI a broader
     sudo file-copy capability.
 
     macOS ships ACL support in ``/bin/chmod``. Linux uses ``setfacl``; if it is
@@ -609,7 +609,7 @@ class CodexBackend(AgentBackend):
         # `approvalPolicy: "never"` is load-bearing for an unattended
         # Telegram bot. Codex's default is "on-request", which makes
         # the server emit approval-request notifications and wait for
-        # a client response before any tool call. Kai has no human
+        # a client response before any tool call. Bjornheim AI has no human
         # in the loop to approve from Telegram, so on-request gates
         # silently: codex waits forever, the bot's stdout-readline
         # ceiling fires, the operator sees "Codex timed out".

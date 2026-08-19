@@ -8,7 +8,7 @@ Provides functionality to:
 4. Manage model switching, voice TTS output, and workspace navigation
 5. Enforce authorization (only allowed user IDs can interact)
 
-This module is the "presentation layer" of Kai — it receives Telegram updates,
+This module is the "presentation layer" of Bjornheim AI — it receives Telegram updates,
 translates them into prompts for the Claude process (claude.py), streams the
 response back to the user, and handles all Telegram-specific concerns like
 message length limits, Markdown fallback, inline keyboards, and typing indicators.
@@ -186,7 +186,7 @@ async def _notify_if_queued(update: Update, chat_id: int) -> bool:
     """Send a notification if the user's message will queue behind the lock.
 
     Called immediately before acquiring the per-chat lock. If the lock is
-    already held (Kai is mid-response), sends a one-line Telegram message
+    already held (Bjornheim AI is mid-response), sends a one-line Telegram message
     so the user knows their message was received. The notification goes
     directly to Telegram via _reply_safe - Claude never sees it. Do NOT
     add a log_message call here; the notification is purely for the user.
@@ -858,7 +858,7 @@ def _get_core_services(context: ContextTypes.DEFAULT_TYPE) -> KaiCoreServices:
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — the initial greeting when a user first messages the bot."""
     assert update.message is not None
-    await update.message.reply_text("Kai is ready. Send me a message.")
+    await update.message.reply_text("Bjornheim AI is ready. Send me a message.")
 
 
 async def _end_session(chat_id: int) -> None:
@@ -1632,7 +1632,7 @@ async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if disposition == CanonicalCancellationDisposition.INTERRUPTED:
             await update.message.reply_text(
-                "Kai could not confirm a clean stop. The interrupted request will not be retried automatically."
+                "Bjornheim AI could not confirm a clean stop. The interrupted request will not be retried automatically."
             )
             return
     pool = _get_pool(context)
@@ -2894,7 +2894,7 @@ async def _github_api_remove_webhook(
     config: Config,
 ) -> None:
     """
-    Remove the Kai webhook from repo.
+    Remove the Bjornheim AI webhook from repo.
 
     Looks up the stored hook ID first. If not stored (webhook was
     manually created), falls back to querying GitHub to find it.
@@ -2975,7 +2975,7 @@ def _manual_webhook_text(repo: str, webhook_url: str | None) -> str:
     lines.extend(
         [
             "  Content type: application/json",
-            "  Secret: (ask your Kai admin)",
+            "  Secret: (ask your Bjornheim AI admin)",
             "  Events: Pushes, Pull requests, Issues, Issue comments, PR reviews",
         ]
     )
@@ -3134,7 +3134,7 @@ async def _handle_github_remove(
     # A linear scan of all users is fine for small deployments.
     other_subscribers = False
     for uid, uc in config.user_configs.items():
-        if uid == chat_id:
+        if uid == chat_id or uc.telegram_id is None:
             continue
         uc_effective = await sessions.get_effective_repos(uc.telegram_id, uc.github_repos)
         if repo in uc_effective:
@@ -3617,7 +3617,7 @@ async def handle_review_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(usage)
         return
 
-    # Review collection shells out to `gh` in the outer Kai process. The
+    # Review collection shells out to `gh` in the outer Bjornheim AI process. The
     # target must therefore come from the user's admin-controlled users.yaml
     # grant, never merely from a self-service notification subscription. This
     # check covers both the inferred and explicit command forms and defaults
@@ -3631,7 +3631,7 @@ async def handle_review_command(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await update.message.reply_text(
             f"Repository `{repo}` is not authorized for GitHub review. "
-            "Ask the Kai administrator to add its exact name to your github_repos entry in users.yaml."
+            "Ask the Bjornheim AI administrator to add its exact name to your github_repos entry in users.yaml."
         )
         return
 
@@ -4434,7 +4434,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Couldn't make out any speech in that voice message.")
         return
 
-    # Echo the transcription so the user sees what Kai heard
+    # Echo the transcription so the user sees what Bjornheim AI heard
     await _reply_safe(update.message, f"_Heard:_ {transcript}")
 
     workshop_inbound_message_id: MessageId | None = None
@@ -4548,7 +4548,9 @@ async def _deny_totp_state_error(update: Update, exc: TotpStateError) -> None:
         await update.callback_query.answer("Authentication unavailable.", show_alert=True)
     message = update.message or update.effective_message
     if message is not None:
-        await message.reply_text("Authentication service unavailable. Access denied; contact the Kai administrator.")
+        await message.reply_text(
+            "Authentication service unavailable. Access denied; contact the Bjornheim AI administrator."
+        )
 
 
 async def _check_totp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -4699,8 +4701,11 @@ async def _handle_workshop_private_text(
     async def observe(event) -> None:
         nonlocal live_msg, last_edit_time, last_edit_text
         if not event.text_so_far:
-            return
-        publishable = _stream_publishable_prefix(event.text_so_far)
+            if not event.activity:
+                return
+            publishable = f"_{event.activity}_"
+        else:
+            publishable = _stream_publishable_prefix(event.text_so_far)
         if publishable is None or publishable == last_edit_text:
             return
         now = time.monotonic()
@@ -4731,7 +4736,7 @@ async def _handle_workshop_private_text(
             pass
 
     if result.disposition == CanonicalExecutionDisposition.PREPARATION_DEFERRED:
-        await _reply_safe(update.message, "Kai could not safely prepare this request. Please try again.")
+        await _reply_safe(update.message, "Bjornheim AI could not safely prepare this request. Please try again.")
         return
     if result.disposition in {
         CanonicalExecutionDisposition.ACTIVE_REPLAY,
@@ -4806,7 +4811,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         execution = _get_core_services(context).private_text_execution
         if execution is None:
             log.error("Workshop private-text execution service is unavailable")
-            await _reply_safe(update.message, "Kai's durable execution service is unavailable. Please try again.")
+            await _reply_safe(
+                update.message, "Bjornheim AI's durable execution service is unavailable. Please try again."
+            )
             return
         try:
             acceptance = await execution.accept(
@@ -4833,7 +4840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update.update_id,
                 update.message.message_id,
             )
-            await _reply_safe(update.message, "Kai could not safely accept this request. Please try again.")
+            await _reply_safe(update.message, "Bjornheim AI could not safely accept this request. Please try again.")
             return
     else:
         recorder = context.bot_data.get("workshop_inbound_recorder")
@@ -4997,7 +5004,7 @@ async def _handle_response(
         )
         await _reply_safe(
             update.message,
-            "Kai could not safely prepare durable delivery for this reply. Please try again.",
+            "Bjornheim AI could not safely prepare durable delivery for this reply. Please try again.",
         )
         return
 
@@ -5057,16 +5064,18 @@ async def _handle_response(
 
             now = time.monotonic()
             if not event.text_so_far:
-                continue
-
-            # Stable-prefix gate: only create or edit the live message
-            # when the accumulated text has a coherent prefix to show.
-            # Withholding unstable chunks here means /stop, final
-            # delivery, and edit suppression always operate against text
-            # Telegram actually saw, which is the invariant the rest of
-            # this function relies on. `last_edit_text` is the last
-            # PUBLISHED stable prefix, never raw accumulated text.
-            publishable = _stream_publishable_prefix(event.text_so_far)
+                if not event.activity:
+                    continue
+                publishable = f"_{event.activity}_"
+            else:
+                # Stable-prefix gate: only create or edit the live message
+                # when the accumulated text has a coherent prefix to show.
+                # Withholding unstable chunks here means /stop, final
+                # delivery, and edit suppression always operate against text
+                # Telegram actually saw, which is the invariant the rest of
+                # this function relies on. `last_edit_text` is the last
+                # PUBLISHED stable prefix, never raw accumulated text.
+                publishable = _stream_publishable_prefix(event.text_so_far)
             if publishable is None or publishable == last_edit_text:
                 continue
 
@@ -5097,7 +5106,9 @@ async def _handle_response(
                             text="[error: durable delivery preparation failed]",
                             reader_user=reader_user,
                         )
-                        notice = "Kai could not safely prepare durable delivery for this reply. Please try again."
+                        notice = (
+                            "Bjornheim AI could not safely prepare durable delivery for this reply. Please try again."
+                        )
                         if not await _edit_message_safe(live_msg, notice):
                             await _reply_safe(update.message, notice)
                         return
@@ -5228,7 +5239,7 @@ async def _handle_response(
             )
             await _reply_safe(
                 update.message,
-                "Kai could not safely confirm final delivery. The reply was not sent again to avoid a duplicate.",
+                "Bjornheim AI could not safely confirm final delivery. The reply was not sent again to avoid a duplicate.",
             )
             return
         except Exception:
@@ -5242,7 +5253,7 @@ async def _handle_response(
                 text="[error: durable delivery finalization failed]",
                 reader_user=reader_user,
             )
-            notice = "Kai could not safely finalize durable delivery for this reply. Please try again."
+            notice = "Bjornheim AI could not safely finalize durable delivery for this reply. Please try again."
             if live_msg is None or not await _edit_message_safe(live_msg, notice):
                 await _reply_safe(update.message, notice)
             return

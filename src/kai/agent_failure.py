@@ -1,7 +1,7 @@
 """Backend-neutral agent failure classification and user-safe rendering.
 
 Backend harnesses expose different protocols and native error strings. This
-module converts the subset Kai understands confidently into a stable contract
+module converts the subset Bjornheim AI understands confidently into a stable contract
 that the Telegram presentation layer consumes today and Workshop workers can
 carry across an isolation boundary later.
 """
@@ -21,6 +21,7 @@ class AgentFailureKind(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     TRANSIENT = "transient"
     BACKEND_CRASHED = "backend_crashed"
+    TIMEOUT = "timeout"
     UNKNOWN = "unknown"
 
 
@@ -104,6 +105,13 @@ def classify_agent_failure(error: str | None) -> AgentFailureKind:
     if any(marker in normalized for marker in transient_markers):
         return AgentFailureKind.TRANSIENT
 
+    timeout_markers = (
+        "timed out",
+        "timeout",
+    )
+    if any(marker in normalized for marker in timeout_markers):
+        return AgentFailureKind.TIMEOUT
+
     crashed_markers = (
         "cli not found",
         "process died",
@@ -143,21 +151,23 @@ def _authentication_recovery(
     failure_kind: AgentFailureKind,
 ) -> str:
     """Return backend-specific, credential-free sign-in guidance."""
-    account = f"OS user {os_user}" if os_user else "the Kai service account"
+    account = f"OS user {os_user}" if os_user else "the Bjornheim AI service account"
     if backend == "codex":
         if config.codex_auth_mode == "api_key":
-            return "Ask the Kai operator to refresh the OpenAI API credentials configured for Codex, then retry."
-        return f"Run `codex login` as {account} on the Kai host, then retry."
+            return (
+                "Ask the Bjornheim AI operator to refresh the OpenAI API credentials configured for Codex, then retry."
+            )
+        return f"Run `codex login` as {account} on the Bjornheim AI host, then retry."
     if backend == "opencode":
-        return f"Run `opencode auth login` as {account} on the Kai host, then retry."
+        return f"Run `opencode auth login` as {account} on the Bjornheim AI host, then retry."
     if backend == "pi":
-        return f"Open `pi` as {account} on the Kai host, use `/login`, then retry."
+        return f"Open `pi` as {account} on the Bjornheim AI host, use `/login`, then retry."
     if backend == "claude":
         if failure_kind is AgentFailureKind.AUTHENTICATION_EXPIRED:
-            return f"Open Claude Code as {account} on the Kai host and sign in again, then retry."
-        return f"Refresh the Claude Code credentials for {account} on the Kai host, then retry."
+            return f"Open Claude Code as {account} on the Bjornheim AI host and sign in again, then retry."
+        return f"Refresh the Claude Code credentials for {account} on the Bjornheim AI host, then retry."
     provider_detail = f" for provider {provider}" if provider else ""
-    return f"Ask the Kai operator to refresh the credentials{provider_detail} used by Goose, then retry."
+    return f"Ask the Bjornheim AI operator to refresh the credentials{provider_detail} used by Goose, then retry."
 
 
 def render_agent_failure(
@@ -191,28 +201,33 @@ def render_agent_failure(
     if kind in {AgentFailureKind.AUTHENTICATION_EXPIRED, AgentFailureKind.AUTHENTICATION_REQUIRED}:
         state = "has expired" if kind is AgentFailureKind.AUTHENTICATION_EXPIRED else "is required"
         recovery = _authentication_recovery(backend, provider, os_user, config, kind)
-        return f"Error: Authentication for {route} {state}. Kai did not complete this request.\n\n{recovery}"
+        return f"Error: Authentication for {route} {state}. Bjornheim AI did not complete this request.\n\n{recovery}"
     if kind is AgentFailureKind.QUOTA_EXHAUSTED:
         return (
             f"Error: {route} reported that its credits or usage allowance are exhausted. "
-            "Kai did not complete this request. Try again after the allowance resets, or ask the Kai operator "
+            "Bjornheim AI did not complete this request. Try again after the allowance resets, or ask the Bjornheim AI operator "
             "to select another configured backend/provider."
         )
     if kind is AgentFailureKind.MODEL_UNAVAILABLE:
         return (
-            f"Error: The configured model is unavailable through {route}. Kai did not complete this request. "
-            "Choose another model with /model, or ask the Kai operator to update the configured route."
+            f"Error: The configured model is unavailable through {route}. Bjornheim AI did not complete this request. "
+            "Choose another model with /model, or ask the Bjornheim AI operator to update the configured route."
         )
     if kind is AgentFailureKind.PROVIDER_UNAVAILABLE:
         return (
-            f"Error: {route} is currently unavailable. Kai did not complete this request. "
-            "Retry later, or ask the Kai operator to select another configured backend/provider."
+            f"Error: {route} is currently unavailable. Bjornheim AI did not complete this request. "
+            "Retry later, or ask the Bjornheim AI operator to select another configured backend/provider."
         )
     if kind is AgentFailureKind.TRANSIENT:
-        return f"Error: {route} reported a temporary failure. Kai did not complete this request. Please retry later."
+        return f"Error: {route} reported a temporary failure. Bjornheim AI did not complete this request. Please retry later."
+    if kind is AgentFailureKind.TIMEOUT:
+        return (
+            f"Error: {route} took too long to respond and the request was cancelled. "
+            "Bjornheim AI did not complete this request. Try a shorter or more specific question, or retry."
+        )
     if kind is AgentFailureKind.BACKEND_CRASHED:
         return (
-            f"Error: {route} stopped unexpectedly. Kai did not complete this request. "
-            "Retry once; if it happens again, ask the Kai operator to check the service logs."
+            f"Error: {route} stopped unexpectedly. Bjornheim AI did not complete this request. "
+            "Retry once; if it happens again, ask the Bjornheim AI operator to check the service logs."
         )
     return f"Error: {detail}"

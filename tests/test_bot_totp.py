@@ -208,7 +208,7 @@ async def test_gate_fails_closed_when_totp_state_is_unavailable():
         await handle_message(update, ctx)
 
     update.message.reply_text.assert_called_once_with(
-        "Authentication service unavailable. Access denied; contact the Kai administrator."
+        "Authentication service unavailable. Access denied; contact the Bjornheim AI administrator."
     )
     handle_response.assert_not_awaited()
 
@@ -288,7 +288,7 @@ async def test_gate_denies_when_attempt_state_write_fails():
 
     assert "totp_authenticated_at" not in ctx.user_data
     update.message.reply_text.assert_called_once_with(
-        "Authentication service unavailable. Access denied; contact the Kai administrator."
+        "Authentication service unavailable. Access denied; contact the Bjornheim AI administrator."
     )
 
 

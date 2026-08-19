@@ -188,7 +188,7 @@ def resolve_oneshot_binary(backend: str) -> str:
         return resolved
 
     if backend == "pi":
-        # Pi joined Kai after protected backend registries became the
+        # Pi joined Bjornheim AI after protected backend registries became the
         # deployment contract.  Development installs still get the same PATH
         # discovery convenience as the other backends, but deliberately do
         # not introduce a PI_BIN escape hatch that could diverge from the

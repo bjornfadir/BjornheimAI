@@ -1,5 +1,5 @@
 """
-Semantic memory layer for Kai.
+Semantic memory layer for Bjornheim AI.
 
 Wraps Mem0 with local Qdrant embedded storage and HuggingFace embeddings.
 Provides two core capabilities:
@@ -12,7 +12,7 @@ Provides two core capabilities:
    relevant context into each message before it reaches the agent
    backend.
 
-The module follows Kai's singleton pattern (same as sessions.py): call
+The module follows Bjornheim AI's singleton pattern (same as sessions.py): call
 init_memory() once at startup, then use the module-level functions.
 
 Dependencies: mem0ai, sentence-transformers, qdrant-client (all installed
@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 # part of spec 310: see `Config.memory_search_floor` (env var
 # MEMORY_SEARCH_FLOOR). Both `format_context` below and the
 # `/memory search` UI in `memory_command.py` read the same value at
-# query time so a config change applies everywhere Kai consults memory.
+# query time so a config change applies everywhere Bjornheim AI consults memory.
 # Background: based on smoke testing, clearly relevant results score
 # 0.7+, loosely relevant ~0.35, noise below 0.3.
 
@@ -297,7 +297,7 @@ _SOURCE_SHORT: dict[str, str] = {
     "": "legacy",
 }
 
-# Page size for delete_by_source. Well above any realistic Kai user's
+# Page size for delete_by_source. Well above any realistic Bjornheim AI user's
 # row count (single-digit thousands at most); the loop below still
 # handles larger stores correctly via the page-drain guard. See spec
 # §6.2 for the live-lock tradeoff documentation.
@@ -845,7 +845,7 @@ def _resolve_cached_embedding_model(model: str) -> tuple[str, bool]:
 
 def _mem0_config(config: Config) -> dict:
     """
-    Build Mem0 configuration dict from Kai's config.
+    Build Mem0 configuration dict from Bjornheim AI's config.
 
     Creates the Qdrant storage directory if it does not exist. Uses
     local embedded Qdrant (no server needed) with HuggingFace embeddings.
@@ -2609,7 +2609,7 @@ async def delete_by_source(user_id: str, source: str) -> int:
     when a full page contains no matches, but costs a corner case: if the
     first page is a full _DELETE_PAGE_SIZE of non-matching rows while every
     matching row sits past that position in Mem0's list order, those
-    matches are not deleted. Not reachable at Kai's single-user scale
+    matches are not deleted. Not reachable at Bjornheim AI's single-user scale
     (<10,000 rows per user). If repurposed for multi-tenant scale or if
     per-user row counts approach the page size, push the source filter
     into Qdrant via `filters={"user_id": user_id, "source": source}` so

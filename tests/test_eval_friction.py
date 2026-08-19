@@ -298,7 +298,7 @@ class TestFrustrationSignal:
 
     def test_assistant_messages_never_flagged(self, tmp_path: Path):
         # Frustration is operator-side only; the same phrase from the
-        # assistant must not register, otherwise Kai's own apologetic
+        # assistant must not register, otherwise Bjornheim AI's own apologetic
         # boilerplate would inflate the rate.
         records = [
             HistoryRecord(
@@ -355,7 +355,7 @@ class TestFrustrationSignal:
 
 
 class TestKaiAsksBackSignal:
-    """Signal 2 detection: Kai asking for information already provided."""
+    """Signal 2 detection: Bjornheim AI asking for information already provided."""
 
     @staticmethod
     def _records_for_overlap(tmp_path: Path, prior_text: str, question_text: str):

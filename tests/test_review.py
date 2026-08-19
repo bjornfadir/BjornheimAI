@@ -260,7 +260,7 @@ class TestBuildReviewPrompt:
     def test_with_prior_comments(self):
         """Prior comments are wrapped in PRIOR_REVIEW_THREAD boundary with instructions."""
         meta = _metadata()
-        prior = "[2026-03-12T14:00:00Z] kai-bot:\n## Review by Kai\n\nFound a bug."
+        prior = "[2026-03-12T14:00:00Z] kai-bot:\n## Review by Bjornheim AI\n\nFound a bug."
         prompt = build_review_prompt(meta, "diff", prior_comments=prior)
         assert "--- BEGIN PRIOR_REVIEW_THREAD" in prompt
         assert "Found a bug." in prompt
@@ -474,11 +474,11 @@ class TestFetchPriorComments:
     @pytest.mark.asyncio
     async def test_review_header_without_trailing_newlines(self):
         """Matches review comments even if the header has no trailing newlines."""
-        # _REVIEW_HEADER is "## Review by Kai\n\n" but some comments
+        # _REVIEW_HEADER is "## Review by Bjornheim AI\n\n" but some comments
         # might have the header without trailing whitespace
         comments = [
             _gh_comment(
-                "## Review by Kai\nFound a bug.",
+                "## Review by Bjornheim AI\nFound a bug.",
                 login="kai-bot",
                 created_at="2026-03-12T14:00:00Z",
             ),
@@ -780,7 +780,7 @@ class TestRunReviewGooseDispatch:
     @pytest.mark.asyncio
     async def test_run_review_dispatches_to_goose_reasoner(self):
         """The goose branch builds a GooseOneShotReasoner with the
-        os_user and Kai provider key threaded through, awaits its run
+        os_user and Bjornheim AI provider key threaded through, awaits its run
         with the registry model, and returns the raw text."""
         fake = self._fake_reasoner(text="review body from goose")
 
@@ -815,7 +815,7 @@ class TestRunReviewGooseDispatch:
     async def test_model_resolved_from_registry_per_provider(self, provider, expected_model):
         """(goose, <provider>, PR_REVIEW) registry rows reach the
         reasoner's model kwarg. The provider key passes through in
-        Kai form (deepseek stays deepseek); the reasoner owns the
+        Bjornheim AI form (deepseek stays deepseek); the reasoner owns the
         custom_deepseek wire-name translation at argv build."""
         fake = self._fake_reasoner()
 

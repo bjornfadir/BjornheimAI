@@ -37,7 +37,7 @@ from kai.install import (
 # minimal and stable so a future template-shape change does not bleed
 # into these tests' expected outputs.
 _TEMPLATE_WITH_SECTION = (
-    "# Kai\n"
+    "# Bjornheim AI\n"
     "\n"
     "## Memory Write Routing\n"
     "\n"
@@ -57,14 +57,14 @@ _TEMPLATE_WITH_SECTION = (
 # The same template content but without the recalled-memory section,
 # used to exercise the "template missing the section header" branch.
 _TEMPLATE_WITHOUT_SECTION = (
-    "# Kai\n\n## Memory Write Routing\n\nWrite rules here.\n\n## Behavioral Rules\n\nBehavioral rules here.\n"
+    "# Bjornheim AI\n\n## Memory Write Routing\n\nWrite rules here.\n\n## Behavioral Rules\n\nBehavioral rules here.\n"
 )
 
 # Operator-customized per-user copy that lacks the recalled-memory
 # section. Represents the pre-migration state of operators who installed
 # before this section landed in the tracked template.
 _STALE_PER_USER_COPY = (
-    "# Kai\n"
+    "# Bjornheim AI\n"
     "\n"
     "## Memory Write Routing\n"
     "\n"
@@ -160,7 +160,7 @@ class TestMigrateRecalledMemorySection:
         template.write_text(_TEMPLATE_WITH_SECTION)
         per_user = tmp_path / "per_user.md"
         customized = (
-            "# Kai\n"
+            "# Bjornheim AI\n"
             "\n"
             "## Memory Write Routing\n"
             "\n"

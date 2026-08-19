@@ -1,4 +1,4 @@
-"""Operator-facing smoke commands for verifying a Kai install.
+"""Operator-facing smoke commands for verifying a Bjornheim AI install.
 
 Each smoke command runs a small, idempotent verification of one
 runtime surface; see individual modules for the contract. The

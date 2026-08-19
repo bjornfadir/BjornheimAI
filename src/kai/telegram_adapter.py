@@ -1,4 +1,4 @@
-"""Explicit lifecycle boundary for Kai's Telegram adapter."""
+"""Explicit lifecycle boundary for Bjornheim AI's Telegram adapter."""
 
 from __future__ import annotations
 

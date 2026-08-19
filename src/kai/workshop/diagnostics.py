@@ -86,7 +86,7 @@ def _pending_status(expected_humans: int | None) -> str:
     return (
         "Workshop bootstrap: pending; service startup will seed "
         f"1 workshop, {expected_humans} human principal(s), "
-        f"{expected_humans} Telegram direct channel binding(s), and 1 Kai agent"
+        f"{expected_humans} Telegram direct channel binding(s), and 1 Bjornheim AI agent"
     )
 
 

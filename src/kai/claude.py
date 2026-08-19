@@ -67,6 +67,35 @@ _CLAUDE_STDERR_WARNING_MARKERS = (
     "auth failed",
 )
 
+_TOOL_ACTIVITY_LABELS = {
+    "WebSearch": "🔍 Searching the web",
+    "WebFetch": "🌐 Reading a page",
+    "Bash": "⚙️ Running a command",
+    "Read": "📄 Reading a file",
+    "Write": "📝 Writing a file",
+    "Edit": "📝 Editing a file",
+    "Task": "🧩 Delegating a sub-task",
+}
+
+
+def _describe_tool_activity(name: str, tool_input: dict) -> str:
+    """Human-readable one-liner for a tool_use content block.
+
+    Used only as a live progress hint between text chunks -- never part
+    of the accumulated response text, so it's fine to be terse and
+    slightly lossy about the tool's actual arguments.
+    """
+    label = _TOOL_ACTIVITY_LABELS.get(name, f"⚙️ Using {name}")
+    if name == "WebSearch":
+        query = tool_input.get("query")
+        if query:
+            return f"{label}: {query}"
+    elif name == "WebFetch":
+        url = tool_input.get("url")
+        if url:
+            return f"{label}: {url}"
+    return f"{label}..."
+
 
 # ── Claude Code backend ─────────────────────────────────────────────
 
@@ -248,6 +277,13 @@ class ClaudeCodeBackend(AgentBackend):
             self.claude_effort_level,
             "--permission-mode",
             "bypassPermissions",
+            # Without this, the subprocess inherits the operator's personal
+            # user-scope MCP servers (Playwright, Google Drive, etc. in
+            # ~/.claude.json) which have no bearing on bot conversations and
+            # can hang the whole turn indefinitely during MCP startup (e.g.
+            # an OAuth-gated server waiting on interactive auth that will
+            # never come in this headless context).
+            "--strict-mcp-config",
         ]
 
         # Resolve self-sudo: skip sudo when claude_user matches the bot
@@ -341,7 +377,7 @@ class ClaudeCodeBackend(AgentBackend):
         # `$TMPDIR/claude-settings-<hex>.json`; on a shared /tmp, two
         # os_users whose settings hash identically collide there (the
         # first writer owns the file at mode 0o644 and the second
-        # claude exits with EACCES on the write-open). Kai's argv
+        # claude exits with EACCES on the write-open). Bjornheim AI's argv
         # carries no --settings flag, so the collision cannot occur
         # today; the anchoring to `<DATA_DIR>/tmp/<os_user>/` (per-user
         # dir created and chowned by install.py `_apply_migrate`) stays
@@ -812,9 +848,11 @@ class ClaudeCodeBackend(AgentBackend):
         assert self._proc is not None
         assert self._proc.stdin is not None
         assert self._proc.stdout is not None
+        write_started_at = time.monotonic()
         try:
             self._proc.stdin.write(msg.encode())
             await self._proc.stdin.drain()
+            log.info("Wrote prompt to Claude subprocess in %.2fs", time.monotonic() - write_started_at)
         except OSError as e:
             log.error("Failed to write to Claude process: %s", e)
             await self._kill()
@@ -833,15 +871,20 @@ class ClaudeCodeBackend(AgentBackend):
         # this is a secondary safety net measured across the whole interaction.
         last_activity = time.monotonic()
         max_idle_seconds = self.timeout_seconds * 5  # 10 min of silence at default 120s
+        lines_read = 0  # diagnostic only: distinguishes "silent from the very
+        # first line" (likely a stuck/never-started turn) from "went quiet
+        # partway through" (e.g. a long tool-use gap) when a timeout fires.
         try:
             while True:
                 # Check idle timeout before each readline
-                idle_seconds = time.monotonic() - last_activity
+                readline_started_at = time.monotonic()
+                idle_seconds = readline_started_at - last_activity
                 if idle_seconds > max_idle_seconds:
                     log.error(
-                        "Interaction idle timeout (%.0fs with no output, limit %ds)",
+                        "Interaction idle timeout (%.0fs with no output, limit %ds, %d lines read before going quiet)",
                         idle_seconds,
                         max_idle_seconds,
+                        lines_read,
                     )
                     await self._kill()
                     yield StreamEvent(
@@ -860,7 +903,12 @@ class ClaudeCodeBackend(AgentBackend):
                     timeout = self.timeout_seconds * 3
                     line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=timeout)
                 except TimeoutError:
-                    log.error("Claude response timed out")
+                    log.error(
+                        "Claude response timed out after %.0fs waiting on line #%d (%d lines received so far)",
+                        time.monotonic() - readline_started_at,
+                        lines_read + 1,
+                        lines_read,
+                    )
                     await self._kill()
                     yield StreamEvent(
                         text_so_far=accumulated_text,
@@ -873,6 +921,7 @@ class ClaudeCodeBackend(AgentBackend):
                 # Do NOT reset on empty line (EOF); that means the process died.
                 if line:
                     last_activity = time.monotonic()
+                    lines_read += 1
 
                 if not line:
                     # Process died unexpectedly
@@ -966,6 +1015,21 @@ class ClaudeCodeBackend(AgentBackend):
                         duration_ms=event.get("duration_ms", 0),
                         error=response_error,
                     )
+                    if event.get("is_error", False):
+                        # The CLI's own "result" event can report is_error=true
+                        # (e.g. a server-side API error) with no process crash,
+                        # no readline timeout, and no exception -- previously
+                        # this fell straight through to classify_agent_failure
+                        # with zero logging anywhere, an invisible failure mode
+                        # that looked identical to a silent hang from outside.
+                        log.warning(
+                            "Claude result reported is_error=true after %.0fs "
+                            "(api duration_ms=%s, %d lines read): %s",
+                            time.monotonic() - write_started_at,
+                            event.get("duration_ms"),
+                            lines_read,
+                            response_error,
+                        )
                     yield StreamEvent(text_so_far=response.text, done=True, response=response)
                     return
 
@@ -979,6 +1043,11 @@ class ClaudeCodeBackend(AgentBackend):
                                     accumulated_text += "\n\n"
                                 accumulated_text += new_text
                                 yield StreamEvent(text_so_far=accumulated_text)
+                            elif block.get("type") == "tool_use":
+                                activity = _describe_tool_activity(
+                                    block.get("name", "tool"), block.get("input") or {}
+                                )
+                                yield StreamEvent(text_so_far=accumulated_text, activity=activity)
 
         except Exception as e:
             log.exception("Unexpected error reading Claude stream")

@@ -26,7 +26,7 @@ from kai.workshop.domain import (
 from kai.workshop.projection import CanonicalConversationProjection
 from kai.workshop.store import IdempotencyConflictError, WorkshopEventStore
 
-_NOTIFICATION_QUALIFICATION_BODY = "Kai Workshop notification-group delivery qualification."
+_NOTIFICATION_QUALIFICATION_BODY = "Bjornheim AI Workshop notification-group delivery qualification."
 
 
 class DeliveryQualificationError(RuntimeError):
@@ -41,7 +41,7 @@ class WorkshopDeliveryQualification:
         self._outbox = WorkshopDeliveryOutbox(store)
 
     async def prepare(self, telegram_user_id: int) -> DeliveryRequestResult:
-        """Queue the latest canonical Kai reply in one configured direct chat."""
+        """Queue the latest canonical Bjornheim AI reply in one configured direct chat."""
         if (
             not isinstance(telegram_user_id, int)
             or isinstance(telegram_user_id, bool)
@@ -68,7 +68,7 @@ class WorkshopDeliveryQualification:
             row = await cursor.fetchone()
         if row is None:
             raise DeliveryQualificationError(
-                "No canonical Kai reply exists for that configured Telegram user; send Kai a normal message first"
+                "No canonical Bjornheim AI reply exists for that configured Telegram user; send Bjornheim AI a normal message first"
             )
 
         return await self._outbox.request_delivery(
@@ -104,7 +104,7 @@ class WorkshopDeliveryQualification:
             rows = list(await cursor.fetchall())
         if len(rows) != 1:
             raise DeliveryQualificationError(
-                "Telegram notification group does not resolve to one canonical outbound-only channel; restart Kai "
+                "Telegram notification group does not resolve to one canonical outbound-only channel; restart Bjornheim AI "
                 "after configuring the group"
             )
 

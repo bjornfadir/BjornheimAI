@@ -1,4 +1,4 @@
-"""Transport-neutral construction and lifecycle tests for Kai's core host."""
+"""Transport-neutral construction and lifecycle tests for Bjornheim AI's core host."""
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +16,7 @@ from kai.workshop.bootstrap import (
 )
 from kai.workshop.conversation_commands import WorkshopConversationCommandService
 from kai.workshop.delivery_authority import WorkshopConversationDeliveryAuthority
-from kai.workshop.domain import PrincipalId, RunExecutionOwnerId
+from kai.workshop.domain import PrincipalId, RunExecutionOwnerId, WorkshopId
 from kai.workshop.inbound import InboundMessage
 from kai.workshop.run_execution_authority import (
     RunAttemptStatus,
@@ -157,6 +157,7 @@ def _host() -> KaiApplicationHost:
         principal_storage=SimpleNamespace(),  # type: ignore[arg-type]
         services_info=[],
         registered_backend_ids=frozenset({"codex"}),
+        workshop_id=WorkshopId.new(),
     )
 
 
@@ -310,6 +311,7 @@ async def test_real_core_lifecycle_uses_workshop_identity_without_telegram_appli
         principal_storage=principal_storage,
         services_info=[],
         registered_backend_ids=frozenset({"codex"}),
+        workshop_id=WorkshopId.new(),
     )
 
     services = await host.start()
@@ -403,6 +405,7 @@ async def test_core_activates_delivery_authority_before_recovering_expired_start
         ),
         services_info=[],
         registered_backend_ids=frozenset({"codex"}),
+        workshop_id=WorkshopId.new(),
     )
 
     services = await host.start()

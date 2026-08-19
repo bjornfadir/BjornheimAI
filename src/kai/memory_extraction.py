@@ -219,7 +219,7 @@ _GENERIC_CONFIRMATION_RE = re.compile(
 # growth under a buggy or adversarial caller that fabricates many
 # distinct user_ids.
 #
-# asyncio.Semaphore is NOT thread-safe, but Kai's event loop is single-
+# asyncio.Semaphore is NOT thread-safe, but Bjornheim AI's event loop is single-
 # threaded, so the dict access below is safe without extra locking.
 _SEMAPHORE_CAP = 256
 _per_user_semaphores: OrderedDict[str, asyncio.Semaphore] = OrderedDict()
@@ -408,7 +408,7 @@ _FACT_SCHEMA: dict = {
 # Stored verbatim so review can diff future edits against a known wording.
 # If you edit this prompt, bump _EXTRACTION_PROMPT_VERSION above so
 # existing facts can be targeted for cleanup under the old wording.
-_EXTRACTION_SYSTEM_PROMPT = """You are a memory extraction assistant for Kai, a personal AI agent.
+_EXTRACTION_SYSTEM_PROMPT = """You are a memory extraction assistant for Bjornheim AI, a personal AI agent.
 You receive a short conversation window: zero or more PRIOR CONTEXT
 exchanges followed by ONE current exchange (a USER message and an
 ASSISTANT reply, marked with >>>).
@@ -720,7 +720,7 @@ Important constraints:
 # lesson emerged from the exchange. A required `lessons` would push the
 # extractor toward fabrication.
 #
-# `actors` is required despite being a Kai-specific extension (Sophia
+# `actors` is required despite being a Bjornheim AI-specific extension (Sophia
 # was designed around a single-agent task frame). Every situation has
 # at least "user" as an actor; if the model cannot identify one, the
 # stage-1 classifier should probably have been false. Same logic for
@@ -784,7 +784,7 @@ _EPISODE_SCHEMA: dict = {
 # diff future edits. Bump _EPISODE_PROMPT_VERSION on any substantive
 # change so existing episodes can be targeted for cleanup under the old
 # wording.
-_EPISODE_SYSTEM_PROMPT = """You are an episode generator for Kai, a personal AI agent's memory
+_EPISODE_SYSTEM_PROMPT = """You are an episode generator for Bjornheim AI, a personal AI agent's memory
 system. You receive one USER/ASSISTANT exchange that has been
 pre-classified as containing an episode-worthy situation. Your job
 is to produce a single structured record capturing what happened,
@@ -800,13 +800,13 @@ FIELDS (required unless noted):
   system's input-loss failure after the track-1 ingestion bug."
 
 - context: one to three sentences describing the situation the user
-  and Kai were operating in. What was the state of the world that
+  and Bjornheim AI were operating in. What was the state of the world that
   made this exchange happen? Example: "After a regression caused
-  Kai to refuse user messages about memory, the user ran a
-  live-store cleanup while Kai held the memory system disabled."
+  Bjornheim AI to refuse user messages about memory, the user ran a
+  live-store cleanup while Bjornheim AI held the memory system disabled."
 
 - approach: one to three sentences describing what approach was
-  taken to address the goal. What did Kai or the user do? Example:
+  taken to address the goal. What did Bjornheim AI or the user do? Example:
   "Ran `delete_by_source` against the live Qdrant store to purge
   114 user_raw rows while preserving 100 extracted facts; deferred
   the code removal to a tracked issue."
@@ -840,7 +840,7 @@ FIELDS (required unless noted):
   not classification labels.
 
 - actors: 1 to 10 short strings naming participants in the
-  situation. Use "user" for the user, "Kai" for Kai itself, a
+  situation. Use "user" for the user, "Bjornheim AI" for Bjornheim AI itself, a
   GitHub login or service name for an external actor, or a PR or
   issue number (e.g. "PR #360", "#306") for an artifact that was
   central to the situation.
@@ -881,7 +881,7 @@ def _get_semaphore(user_id: str) -> asyncio.Semaphore:
     still holding it, a subsequent call for A misses the cache, creates
     a fresh `Semaphore(1)`, and runs concurrently with the original.
     Per-user serialization briefly relaxes in that window. Not
-    reachable at Kai's scale (requires 256+ unique active users within
+    reachable at Bjornheim AI's scale (requires 256+ unique active users within
     a single 2-4s extraction window). Documented here rather than
     fixed.
     """
@@ -2097,7 +2097,7 @@ async def _run_extractor(
       sandboxing without the billing tradeoff.
     - --system-prompt fully replaces the default system prompt; combined
       with a neutral cwd that has no CLAUDE.md, prevents the extractor
-      from inheriting Kai's workspace identity, voice, or operating rules.
+      from inheriting Bjornheim AI's workspace identity, voice, or operating rules.
     - --tools "" disables all built-in tools (per --help: `Use "" to
       disable all tools`). The extractor only reads stdin and writes JSON.
     - --no-session-persistence keeps ~/.claude/projects/ from growing a
@@ -2516,7 +2516,7 @@ async def _generate_episode(
                 else:
                     episode = validated
                     # Build the metadata dict matching the Sophia
-                    # schema + the `actors` Kai extension. `lessons`
+                    # schema + the `actors` Bjornheim AI extension. `lessons`
                     # is optional and absent from the dict when the
                     # model omitted it (the design-doc "if anything"
                     # pattern; absence is the sentinel for "no lesson

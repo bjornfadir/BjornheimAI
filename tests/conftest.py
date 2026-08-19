@@ -11,7 +11,7 @@ guarantees that individual tests don't need to remember to set up.
 # `$MEM0_DIR/migrations_qdrant` (see mem0/memory/main.py:378-379 and
 # the parallel construction at line 1819). That path is hardcoded
 # outside the user's `vector_store.config` and defaults to
-# `$HOME/.mem0/migrations_qdrant`. If the production Kai service is
+# `$HOME/.mem0/migrations_qdrant`. If the production Bjornheim AI service is
 # running on the same machine, it holds a portalocker lock on that
 # folder and any test-suite run racing against it dies with
 # `Storage folder ... is already accessed by another instance of

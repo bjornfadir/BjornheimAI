@@ -347,8 +347,8 @@ class TestErrorMessageLifecycle:
         error_calls = self._error_path_calls(mock_reply_safe)
         assert len(error_calls) == 1
         assert error_calls[0].args[1] == (
-            "Error: Authentication for Codex is required. Kai did not complete this request.\n\n"
-            "Run `codex login` as OS user daniel on the Kai host, then retry."
+            "Error: Authentication for Codex is required. Bjornheim AI did not complete this request.\n\n"
+            "Run `codex login` as OS user daniel on the Bjornheim AI host, then retry."
         )
 
     @pytest.mark.asyncio

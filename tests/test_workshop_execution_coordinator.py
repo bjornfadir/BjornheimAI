@@ -211,7 +211,8 @@ class TestCanonicalExecutionCoordinator:
             assert result.disposition == CanonicalExecutionDisposition.FAILED
             bodies = await _terminal_bodies(store)
             assert (
-                bodies[-1] == "Authentication for the configured agent is required. Kai did not complete this request."
+                bodies[-1]
+                == "Authentication for the configured agent is required. Bjornheim AI did not complete this request."
             )
             assert "native" not in bodies[-1]
         finally:
@@ -299,7 +300,7 @@ class TestCanonicalExecutionCoordinator:
             assert (await authority.attempt(granted.claim.attempt_id)).status == RunAttemptStatus.INTERRUPTED
             assert (await WorkshopRunLifecycle(store).state(run.run_id)).status == RunStatus.FAILED
             assert (await _terminal_bodies(store))[-1] == (
-                "Kai was interrupted while the configured agent was working. This request was not retried."
+                "Bjornheim AI was interrupted while the configured agent was working. This request was not retried."
             )
             replay = await coordinator.execute(run.run_id)
             assert replay.disposition == CanonicalExecutionDisposition.TERMINAL_REPLAY

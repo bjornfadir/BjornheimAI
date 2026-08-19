@@ -8,7 +8,7 @@ and any future codex-driven agent) all need to recover the final
 agent_message text from that stream, so the parser lives here rather
 than being duplicated per caller.
 
-This module is intentionally tiny and dependency-free: no Kai-side
+This module is intentionally tiny and dependency-free: no Bjornheim AI-side
 imports, no I/O, no logging. It exists so the two callers above can
 share one definition site without one importing from the other (which
 would couple unrelated agent surfaces; review.py has no reason to know

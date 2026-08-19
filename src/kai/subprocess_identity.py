@@ -16,7 +16,7 @@ def wrap_command_for_target_user(
     """Enter a private workspace after sudo changes execution identity.
 
     ``asyncio.create_subprocess_exec(cwd=...)`` changes directory before it
-    executes sudo, while the child still has the Kai service UID. Canonical
+    executes sudo, while the child still has the Bjornheim AI service UID. Canonical
     managed homes are intentionally private to the target OS user, so the
     service cannot enter them. ``sudo -D`` performs that transition under the
     target-user execution policy instead.

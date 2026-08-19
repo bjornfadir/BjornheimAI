@@ -1,4 +1,4 @@
-"""Explicit lifecycle boundary for Kai's mixed HTTP and Workshop listeners."""
+"""Explicit lifecycle boundary for Bjornheim AI's mixed HTTP and Workshop listeners."""
 
 from __future__ import annotations
 

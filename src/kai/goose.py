@@ -26,7 +26,7 @@ from kai.backend_registry import BackendRegistryError, backend_registry_is_autho
 log = logging.getLogger(__name__)
 
 
-# Map Kai logical model names to Anthropic model IDs for GOOSE_MODEL.
+# Map Bjornheim AI logical model names to Anthropic model IDs for GOOSE_MODEL.
 # Values are the API's undated alias forms, the same IDs the claude
 # CLI resolves its short aliases to, so the two backends agree on
 # which SKU a logical name means. The aliases pin a family version
@@ -44,14 +44,14 @@ _ANTHROPIC_MODEL_MAP: dict[str, str] = {
 }
 
 
-# Map Kai provider keys to goose's wire-level provider names. Kai uses
+# Map Bjornheim AI provider keys to goose's wire-level provider names. Bjornheim AI uses
 # "deepseek" as its provider key everywhere (BACKEND_PROVIDERS, the
 # model registry, per-user config; shared with the opencode backend),
 # but goose ships DeepSeek as a declarative provider named
 # "custom_deepseek"; passing the bare name fails with "Unknown
 # provider: deepseek" before any API call. The .get(key, key) fallback
 # passes every other provider through unchanged, so the map only grows
-# when goose names a provider differently than Kai does.
+# when goose names a provider differently than Bjornheim AI does.
 _GOOSE_PROVIDER_MAP: dict[str, str] = {
     "deepseek": "custom_deepseek",
 }
@@ -59,13 +59,13 @@ _GOOSE_PROVIDER_MAP: dict[str, str] = {
 
 def goose_provider_id(provider: str) -> str:
     """
-    Translate a Kai provider key to goose's wire-level provider name.
+    Translate a Bjornheim AI provider key to goose's wire-level provider name.
 
     Used by every site that hands a provider name to the goose binary:
     `GooseBackend.build_env` (GOOSE_PROVIDER) and the `goose run`
-    one-shot argv in review and triage (`--provider`). Kai-level
+    one-shot argv in review and triage (`--provider`). Bjornheim AI-level
     surfaces (wizard, /settings, users.yaml, the model registry) keep
-    the Kai key; only the goose wire name differs.
+    the Bjornheim AI key; only the goose wire name differs.
     """
     return _GOOSE_PROVIDER_MAP.get(provider, provider)
 
@@ -124,7 +124,7 @@ class GooseBackend(AcpBackend):
         """
         Add GOOSE_MODEL (and conditionally GOOSE_PROVIDER) to the env.
 
-        Kai's logical model names ("sonnet", "opus", "haiku") only
+        Bjornheim AI's logical model names ("sonnet", "opus", "haiku") only
         apply to the Anthropic provider. Other providers require full
         model IDs set via user config (users.yaml or /settings); those
         pass through unchanged.
@@ -132,12 +132,12 @@ class GooseBackend(AcpBackend):
         GOOSE_PROVIDER tells the goose binary which provider backend to
         talk to (openai, anthropic, google, etc.). Without it,
         session/new fails with "Internal error" against a binary that
-        has no default provider configured. Kai's wizard writes
+        has no default provider configured. Bjornheim AI's wizard writes
         DEFAULT_PROVIDER to /etc/kai/env for its own bookkeeping, but the
         goose binary reads the GOOSE_-prefixed name; the translation
         happens here so the two layers stay decoupled. The value runs
         through `goose_provider_id` because goose's wire-level provider
-        names can differ from Kai's keys (deepseek is custom_deepseek
+        names can differ from Bjornheim AI's keys (deepseek is custom_deepseek
         on the goose side).
 
         Guarded on `self.provider` truthiness because it can be the
@@ -153,7 +153,7 @@ class GooseBackend(AcpBackend):
             base_env["GOOSE_MODEL"] = mapped
         if self.provider:
             base_env["GOOSE_PROVIDER"] = goose_provider_id(self.provider)
-        # Kai provisions one canonical backend-neutral instruction file.
+        # Bjornheim AI provisions one canonical backend-neutral instruction file.
         # Restrict Goose's context discovery to that surface so it cannot
         # consume a stale Claude compatibility file after a backend switch.
         base_env["CONTEXT_FILE_NAMES"] = json.dumps(["AGENTS.md"])

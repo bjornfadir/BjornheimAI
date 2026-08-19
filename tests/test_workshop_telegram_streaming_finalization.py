@@ -86,7 +86,7 @@ def _claim(*, execution_contract=STREAMING_FINALIZATION_CONTRACT) -> DeliveryCla
         purpose=CONVERSATION_REPLY_PURPOSE,
         execution_contract=execution_contract,
         authority_epoch_id=DeliveryAuthorityEpochId.new(),
-        author_display_name="Kai",
+        author_display_name="Bjornheim AI",
         body="Final answer",
         lease_expires_at=_NOW + timedelta(seconds=30),
     )

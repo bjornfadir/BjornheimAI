@@ -1,4 +1,4 @@
-"""Metadata validation for protected Kai configuration files."""
+"""Metadata validation for protected Bjornheim AI configuration files."""
 
 from __future__ import annotations
 

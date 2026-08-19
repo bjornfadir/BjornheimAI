@@ -102,6 +102,23 @@ def bootstrap_human_principal_id(
     return PrincipalId.derived(workshop_id, f"human:{token}")
 
 
+def bootstrap_human_channel_id(
+    workshop_id: WorkshopId,
+    transport: str,
+    external_channel_id: str,
+) -> ChannelId:
+    """Derive the direct-channel ID bootstrap will assign one external human.
+
+    For a direct channel, external_channel_id equals the human's own
+    external_subject (see inbound.py's direct-channel sender/channel
+    equality check) - callers resolving a human's own DM channel from
+    their transport identity can pass the same value used for
+    bootstrap_human_principal_id's external_subject.
+    """
+    channel_token = _stable_token(transport, external_channel_id)
+    return ChannelId.derived(workshop_id, f"direct-channel:{channel_token}")
+
+
 def _idempotency_key(kind: str, stable_token: str) -> str:
     return f"{_BOOTSTRAP_PREFIX}:{kind}:{stable_token}"
 
@@ -184,7 +201,7 @@ async def bootstrap_default_workshop(
                 aggregate_id=workshop_id,
                 occurred_at=now,
                 idempotency_key=workshop_key,
-                payload={"name": "Kai Workshop"},
+                payload={"name": "Bjornheim AI Workshop"},
                 metadata={"source": "bootstrap"},
             )
         )
@@ -212,7 +229,7 @@ async def bootstrap_default_workshop(
         event_type=WorkshopEventType.PRINCIPAL_CREATED,
         aggregate_type="principal",
         aggregate_id=agent_principal_id,
-        payload={"kind": "agent", "display_name": "Kai"},
+        payload={"kind": "agent", "display_name": "Bjornheim AI"},
     )
     await ensure(
         idempotency_key=_idempotency_key("membership", "agent-kai"),
@@ -226,7 +243,7 @@ async def bootstrap_default_workshop(
         event_type=WorkshopEventType.AGENT_CREATED,
         aggregate_type="agent",
         aggregate_id=agent_id,
-        payload={"principal_id": agent_principal_id, "name": "Kai"},
+        payload={"principal_id": agent_principal_id, "name": "Bjornheim AI"},
     )
 
     for human in ordered_humans:
@@ -239,7 +256,7 @@ async def bootstrap_default_workshop(
         )
         external_identity_id = ExternalIdentityId.derived(workshop_id, f"external-identity:{token}")
         membership_id = WorkshopMembershipId.derived(workshop_id, f"membership:human:{token}")
-        channel_id = ChannelId.derived(workshop_id, f"direct-channel:{channel_token}")
+        channel_id = bootstrap_human_channel_id(workshop_id, human.transport, human.external_channel_id)
         human_channel_membership_id = ChannelMembershipId.derived(
             workshop_id,
             f"channel-membership:{channel_token}:human:{token}",

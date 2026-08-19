@@ -124,14 +124,14 @@ class TestDefaultWorkshopBootstrap:
             channel_memberships = [tuple(row) for row in await cursor.fetchall()]
 
         assert len(workshops) == 1
-        assert workshops[0][1] == "Kai Workshop"
+        assert workshops[0][1] == "Bjornheim AI Workshop"
         assert [(row[1], row[2]) for row in principals] == [
-            ("agent", "Kai"),
+            ("agent", "Bjornheim AI"),
             ("human", "Admin"),
             ("human", "Second"),
         ]
         assert roles == ["admin", "agent", "member"]
-        assert [row[0] for row in agents] == ["Kai"]
+        assert [row[0] for row in agents] == ["Bjornheim AI"]
         assert len(channels) == 2
         assert all(row[1] == "direct" for row in channels)
         assert [(row[0], row[1]) for row in bindings] == [("telegram", "101"), ("telegram", "202")]

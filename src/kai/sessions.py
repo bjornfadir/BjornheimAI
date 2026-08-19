@@ -1,7 +1,7 @@
 """
 SQLite database layer for sessions, jobs, settings, and workspace history.
 
-Provides async CRUD operations for all persistent state in Kai, organized
+Provides async CRUD operations for all persistent state in Bjornheim AI, organized
 into four tables:
 
 1. **sessions** - Agent session tracking (session ID, model).
@@ -340,7 +340,7 @@ async def bootstrap_workshop_foundation(
     *,
     notification_channels: tuple[BootstrapNotificationChannel, ...] = (),
 ) -> BootstrapResult:
-    """Seed non-authoritative Workshop records on Kai's initialized DB."""
+    """Seed non-authoritative Workshop records on Bjornheim AI's initialized DB."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -355,7 +355,7 @@ async def bootstrap_workshop_foundation(
 async def load_workshop_principal_storage_registry(
     runtime_profiles: WorkshopRuntimeProfileRegistry,
 ) -> WorkshopPrincipalStorageRegistry:
-    """Resolve canonical storage ownership on Kai's initialized database."""
+    """Resolve canonical storage ownership on Bjornheim AI's initialized database."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -369,7 +369,7 @@ async def load_workshop_principal_storage_registry(
 async def load_workshop_channel_history_registry(
     runtime_profiles: WorkshopRuntimeProfileRegistry,
 ) -> WorkshopChannelHistoryRegistry:
-    """Resolve canonical channel histories on Kai's initialized database."""
+    """Resolve canonical channel histories on Bjornheim AI's initialized database."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -381,7 +381,7 @@ async def load_workshop_channel_history_registry(
 
 
 async def record_workshop_inbound_message(message: InboundMessage) -> AppendResult:
-    """Serialize one canonical shadow write on Kai's shared SQLite connection."""
+    """Serialize one canonical shadow write on Bjornheim AI's shared SQLite connection."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -405,7 +405,7 @@ async def record_workshop_inbound_artifact(
     *,
     storage_root: Path,
 ) -> AppendResult:
-    """Serialize one canonical artifact shadow write on Kai's shared database."""
+    """Serialize one canonical artifact shadow write on Bjornheim AI's shared database."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -414,7 +414,7 @@ async def record_workshop_inbound_artifact(
 
 
 async def record_workshop_outbound_message(message: OutboundMessage) -> AppendResult:
-    """Serialize one assistant-result shadow write on Kai's shared database."""
+    """Serialize one assistant-result shadow write on Bjornheim AI's shared database."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:
@@ -461,7 +461,7 @@ async def record_workshop_streaming_finalization(
 
 
 async def record_workshop_delivery_observation(observation: DeliveryObservation) -> AppendResult:
-    """Serialize one transport-delivery observation on Kai's shared database."""
+    """Serialize one transport-delivery observation on Bjornheim AI's shared database."""
     if _workshop_event_lock is None:
         raise RuntimeError("Database not initialized - call init_db() first")
     async with _workshop_event_lock:

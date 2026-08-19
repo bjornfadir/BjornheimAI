@@ -6,7 +6,7 @@ and issue triage (and any caller that needs a bounded, stateless
 model call) so the caller does not embed provider subprocess
 mechanics. Distinct from `kai.backend.AgentBackend`: that
 abstraction is for persistent, interactive sessions that own a long-
-running subprocess and inject Kai's identity / memory / history
+running subprocess and inject Bjornheim AI's identity / memory / history
 context. A one-shot reasoner has different lifecycle requirements: no
 persistent state, a hard per-call timeout, stdin-only prompt delivery,
 optional structured-output schema, and an envelope that the CALLER
@@ -72,9 +72,9 @@ log = logging.getLogger(__name__)
 
 # Neutral cwd for the one-shot subprocess. The directory has no
 # CLAUDE.md, no project files, and no checked-in conventions, so the
-# spawned model cannot accidentally inherit Kai's workspace identity,
+# spawned model cannot accidentally inherit Bjornheim AI's workspace identity,
 # voice, or instructions. `_ensure_extractor_cwd()` creates it lazily
-# on first call; matches Kai's no-import-time-IO convention so a
+# on first call; matches Bjornheim AI's no-import-time-IO convention so a
 # permissions or path failure surfaces as a logged extractor miss
 # rather than an import-time crash that takes the bot down.
 _EXTRACTOR_CWD = DATA_DIR / "memory" / "extractor_cwd"
@@ -101,12 +101,12 @@ _SUBPROCESS_ENV_ALLOWLIST = (
 
 # Codex one-shot calls are classifiers/renderers, not interactive agents.  Keep
 # their execution boundary independent of the operator's Codex configuration
-# and give the model access only to the neutral working root that Kai creates
+# and give the model access only to the neutral working root that Bjornheim AI creates
 # for the call.  The permission-profile value is one TOML inline table because
 # `codex -c` dotted-path parsing cannot represent the special `:minimal` and
 # `:workspace_roots` keys reliably one segment at a time.
 _CODEX_ONESHOT_PERMISSION_PROFILE = (
-    'permissions.kai-oneshot={description="Kai bounded one-shot", '
+    'permissions.kai-oneshot={description="Bjornheim AI bounded one-shot", '
     'filesystem={":minimal"="read", ":workspace_roots"={"."="read"}}, '
     "network={enabled=false}}"
 )
@@ -442,7 +442,7 @@ def _wrap_cmd_for_user(
     `claude` / `codex` against that PATH before applying its sudoers
     check (the sudoers rule pins the resolved absolute path). ``-D``
     enters the selected workspace after sudo assumes the target identity;
-    the Kai service user never needs traversal access to private managed
+    the Bjornheim AI service user never needs traversal access to private managed
     homes.
     """
     preserve = ",".join(preserve_vars if preserve_vars is not None else _preserved_auth_vars_for(backend))
@@ -591,7 +591,7 @@ class ClaudeOneShotReasoner:
       without that trade-off.
     - `--system-prompt` fully replaces the default; combined with a
       neutral cwd that has no CLAUDE.md, the spawned model cannot
-      inherit Kai's workspace identity, voice, or operating rules.
+      inherit Bjornheim AI's workspace identity, voice, or operating rules.
     - `--tools ""` disables all built-in tools.
     - `--no-session-persistence` keeps `~/.claude/projects/` from
       growing a directory per call.
@@ -2038,7 +2038,7 @@ class OpenCodeOneShotReasoner:
         )
 
         # Step 2: session/new. The cwd matches the subprocess working
-        # directory so opencode's session model and Kai's view of the
+        # directory so opencode's session model and Bjornheim AI's view of the
         # working tree agree. mcpServers is empty: one-shot calls do
         # not need MCP integration, and excluding the field would
         # leave opencode reading whatever its config files specify
@@ -2323,10 +2323,10 @@ class GooseOneShotReasoner:
 
     - The provider is an explicit argv flag: goose is multi-provider
       and the registry's goose model names are bare (no provider
-      prefix), so the constructor takes the Kai provider key and the
+      prefix), so the constructor takes the Bjornheim AI provider key and the
       argv carries `--provider <goose_provider_id(provider)>`. The
       wire-name translation matters: goose ships DeepSeek as
-      `custom_deepseek` and rejects the bare Kai key.
+      `custom_deepseek` and rejects the bare Bjornheim AI key.
     - No structured-output channel at all: like opencode, the JSON
       instruction rides the caller's prompt and compliance is model
       discipline, so the schema-backed path parses through
@@ -2356,7 +2356,7 @@ class GooseOneShotReasoner:
                 collapses to the current process user) spawns goose
                 in-process; a non-bot username wraps the argv in
                 `sudo -H -D <workspace> -u <user>`.
-            provider: Kai provider key for the `--provider` flag
+            provider: Bjornheim AI provider key for the `--provider` flag
                 (translated to goose's wire name at argv build).
                 Empty omits the flag so goose falls back to its own
                 GOOSE_PROVIDER / config default; production callers
@@ -2599,7 +2599,7 @@ class GooseOneShotReasoner:
 # Pi can authenticate either from the target user's ~/.pi/agent/auth.json or
 # through provider keys.  HOME reaches the former (and is rewritten by
 # sudo -H); the remaining entries are the documented provider-key surface.
-# Control-plane credentials and Kai's internal principal never enter this
+# Control-plane credentials and Bjornheim AI's internal principal never enter this
 # bounded, tool-free subprocess.
 _PI_ENV_BASE_ALLOWLIST = ("PATH", "HOME")
 

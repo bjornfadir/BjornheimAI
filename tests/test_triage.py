@@ -449,7 +449,7 @@ class TestRunTriageGooseDispatch:
     @pytest.mark.asyncio
     async def test_run_triage_dispatches_to_goose_reasoner(self):
         """The goose branch builds a GooseOneShotReasoner with the
-        os_user and Kai provider key threaded through, awaits its run
+        os_user and Bjornheim AI provider key threaded through, awaits its run
         with the registry model, and returns the raw text."""
         fake = self._fake_reasoner(text='{"labels": ["bug"]}')
 
@@ -484,7 +484,7 @@ class TestRunTriageGooseDispatch:
     async def test_model_resolved_from_registry_per_provider(self, provider, expected_model):
         """(goose, <provider>, ISSUE_TRIAGE) registry rows reach the
         reasoner's model kwarg. The provider key passes through in
-        Kai form (deepseek stays deepseek); the reasoner owns the
+        Bjornheim AI form (deepseek stays deepseek); the reasoner owns the
         custom_deepseek wire-name translation at argv build."""
         fake = self._fake_reasoner()
 
@@ -1488,7 +1488,7 @@ class TestTriageActionability:
         the duplicate and wontfix_candidate fallbacks (which DO
         recommend closing, since the maintainer is the one closing).
         The v2 fix distinguishes maintainer-driven recommendations
-        (allowed) from claims about Kai's automatic behavior (still
+        (allowed) from claims about Bjornheim AI's automatic behavior (still
         forbidden). The prompt must contain phrasing that supports the
         distinction; assert on the load-bearing fragments here.
         """
@@ -1496,7 +1496,7 @@ class TestTriageActionability:
         prompt = build_triage_prompt(meta, related_issues="[]", projects="[]")
         assert "next_action describes what the MAINTAINER should do" in prompt
         assert "Maintainer-driven close, assign, label, and milestone recommendations are fine" in prompt
-        assert "Do NOT claim Kai will perform any of these automatically" in prompt
+        assert "Do NOT claim Bjornheim AI will perform any of these automatically" in prompt
         # The wontfix_candidate framing as suggestion-not-verdict is
         # the load-bearing phrase for false-positive risk; assert it
         # exists too so a future prompt edit cannot silently drop it.

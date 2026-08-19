@@ -301,7 +301,7 @@ function runStatusCopy(run: WorkshopRun): string {
     authentication_expired: "Sign in to the configured backend again, then retry.",
     authentication_required: "Sign in to the configured backend, then retry.",
     backend_crashed: "The agent process stopped unexpectedly. Retry this request.",
-    execution_interrupted: "Kai was interrupted while the agent was working. Retry this request.",
+    execution_interrupted: "Bjornheim AI was interrupted while the agent was working. Retry this request.",
     model_unavailable: "The configured model is unavailable. Choose an available model, then retry.",
     no_response: "The agent ended without a response. Retry this request.",
     provider_unavailable: "The provider is temporarily unavailable. Try again later.",
@@ -310,7 +310,7 @@ function runStatusCopy(run: WorkshopRun): string {
   };
   return (
     (run.terminalCode && actionableFailures[run.terminalCode]) ||
-    "The agent could not complete this request. Retry it or ask the operator to inspect Kai."
+    "The agent could not complete this request. Retry it or ask the operator to inspect Bjornheim AI."
   );
 }
 
@@ -361,7 +361,7 @@ function EnrollmentView({
       <div className="enrollment-glow" aria-hidden="true" />
       <header className="enrollment-brand">
         <span className="brand-mark">K</span>
-        <span>Kai Workshop</span>
+        <span>Bjornheim AI Workshop</span>
         <span className="preview-badge">Workshop preview</span>
       </header>
 
@@ -371,7 +371,7 @@ function EnrollmentView({
           <h1>People and agents, working in the same room.</h1>
           <p className="lede">
             Open the canonical conversation already shared with Telegram. Your
-            history and live updates come from Kai—not from this browser.
+            history and live updates come from Bjornheim AI—not from this browser.
           </p>
 
           <ol className="threshold-steps" aria-label="How Workshop connects">
@@ -379,7 +379,7 @@ function EnrollmentView({
               <span>01</span>
               <div>
                 <strong>Enroll this device</strong>
-                <p>Use a short-lived grant issued by the Kai operator.</p>
+                <p>Use a short-lived grant issued by the Bjornheim AI operator.</p>
               </div>
             </li>
             <li>
@@ -886,7 +886,7 @@ function WorkshopView({
       );
     } catch (caught) {
       setSubmissionError(
-        caught instanceof Error ? caught.message : "Kai could not run this command.",
+        caught instanceof Error ? caught.message : "Bjornheim AI could not run this command.",
       );
     } finally {
       setSubmitting(false);
@@ -928,7 +928,7 @@ function WorkshopView({
       >
         <header className="sidebar-header">
           <div className="sidebar-title">
-            <p className="overline">Kai Workshop</p>
+            <p className="overline">Bjornheim AI Workshop</p>
           </div>
           <div className="sidebar-header-actions">
             <button
@@ -1108,7 +1108,7 @@ function WorkshopView({
               <p>
                 {channel.kind === "notification"
                   ? "Authenticated GitHub activity appears here live and is delivered to every configured client."
-                  : "Messages below come from Kai’s durable conversation history across every connected client."}
+                  : "Messages below come from Bjornheim AI’s durable conversation history across every connected client."}
               </p>
             </div>
           </div>
@@ -1196,7 +1196,7 @@ function WorkshopView({
           ) : (
             <p className="read-only-channel-notice">
               {channel.kind === "notification"
-                ? "This channel is outbound-only. Kai records delivery here, but it does not accept conversation commands."
+                ? "This channel is outbound-only. Bjornheim AI records delivery here, but it does not accept conversation commands."
                 : "Sending messages from Workshop is not available for this conversation yet."}
             </p>
           )}
@@ -1221,7 +1221,7 @@ function WorkshopView({
           <span className="section-number">01</span>
           <h3>Connection</h3>
           <ConnectionIndicator connection={connection} />
-          <p>History and new messages are synchronized directly with Kai.</p>
+          <p>History and new messages are synchronized directly with Bjornheim AI.</p>
         </section>
 
         <section className="context-section">
@@ -1497,7 +1497,7 @@ export default function App(): React.JSX.Element {
   }
 
   if (!session || !navigation) {
-    return <main className="loading-workshop">Opening Kai Workshop…</main>;
+    return <main className="loading-workshop">Opening Bjornheim AI Workshop…</main>;
   }
 
   return (

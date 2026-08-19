@@ -693,7 +693,7 @@ def _ends_with_question_mark(text: str) -> bool:
 
 
 def _detect_kai_asks_back(records: list[HistoryRecord], data_dir: Path) -> list[FrictionEvent]:
-    """Signal 2: Kai asking for information previously given.
+    """Signal 2: Bjornheim AI asking for information previously given.
 
     For each assistant record ending with `?`, compute its content-word
     set and look back over the immediately-preceding `_KAI_ASKS_BACK_WINDOW`

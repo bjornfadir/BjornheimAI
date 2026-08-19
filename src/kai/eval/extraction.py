@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # `tests/test_eval_extraction.py::test_v5_pinned_drift` integration
 # test hashes this string against a known-good digest and fails on
 # any silent edit.
-_PROMPT_V5_PINNED = """You are a memory extraction assistant for Kai, a personal AI agent.
+_PROMPT_V5_PINNED = """You are a memory extraction assistant for Bjornheim AI, a personal AI agent.
 You receive a short conversation window: zero or more PRIOR CONTEXT
 exchanges followed by ONE current exchange (a USER message and an
 ASSISTANT reply, marked with >>>).
@@ -218,7 +218,7 @@ Important constraints:
 # `tests/test_eval_extraction.py::test_v6_pinned_drift` integration
 # test hashes this string against a known-good digest and fails on
 # any silent edit.
-_PROMPT_V6_PINNED = """You are a memory extraction assistant for Kai, a personal AI agent.
+_PROMPT_V6_PINNED = """You are a memory extraction assistant for Bjornheim AI, a personal AI agent.
 You receive a short conversation window: zero or more PRIOR CONTEXT
 exchanges followed by ONE current exchange (a USER message and an
 ASSISTANT reply, marked with >>>).

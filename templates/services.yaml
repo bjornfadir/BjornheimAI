@@ -1,6 +1,6 @@
 # ── External Services ────────────────────────────────────────────────
 #
-# Declarative HTTP service definitions for Kai. Each entry describes an
+# Declarative HTTP service definitions for Bjornheim AI. Each entry describes an
 # external API that inner Claude can call via the local proxy endpoint.
 #
 # Setup:
@@ -11,9 +11,9 @@
 #      lists in users.yaml.
 #   4. Set the corresponding API key(s) in .env for single-user installs,
 #      or /etc/kai/env for protected installs.
-#   5. Restart Kai.
+#   5. Restart Bjornheim AI.
 #
-# Kai injects authentication from the server-side env at call time — API keys never
+# Bjornheim AI injects authentication from the server-side env at call time — API keys never
 # enter the selected agent's context. See <DATA_DIR>/home/<chat_id>/AGENTS.md for usage docs.
 #
 # Auth types:

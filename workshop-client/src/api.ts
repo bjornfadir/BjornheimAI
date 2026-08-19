@@ -221,7 +221,7 @@ export async function loadNavigation(token: string): Promise<WorkshopNavigation>
     typeof payload.principal.display_name !== "string" ||
     !Array.isArray(payload.workshops)
   ) {
-    throw new Error("Kai returned unsupported Workshop navigation.");
+    throw new Error("Bjornheim AI returned unsupported Workshop navigation.");
   }
 
   const workshops = payload.workshops.map((rawWorkshop) => {
@@ -233,7 +233,7 @@ export async function loadNavigation(token: string): Promise<WorkshopNavigation>
       typeof rawWorkshop.role !== "string" ||
       !Array.isArray(rawWorkshop.channels)
     ) {
-      throw new Error("Kai returned unsupported Workshop navigation.");
+      throw new Error("Bjornheim AI returned unsupported Workshop navigation.");
     }
     const channels = rawWorkshop.channels.map((rawChannel) => {
       if (
@@ -249,7 +249,7 @@ export async function loadNavigation(token: string): Promise<WorkshopNavigation>
         !Array.isArray(rawChannel.agents) ||
         !Array.isArray(rawChannel.participants)
       ) {
-        throw new Error("Kai returned unsupported Workshop navigation.");
+        throw new Error("Bjornheim AI returned unsupported Workshop navigation.");
       }
       const agents = rawChannel.agents.map((rawAgent) => {
         if (
@@ -258,7 +258,7 @@ export async function loadNavigation(token: string): Promise<WorkshopNavigation>
           !AGENT_PATTERN.test(rawAgent.agent_id) ||
           typeof rawAgent.name !== "string"
         ) {
-          throw new Error("Kai returned unsupported Workshop navigation.");
+          throw new Error("Bjornheim AI returned unsupported Workshop navigation.");
         }
         return { agentId: rawAgent.agent_id, name: rawAgent.name };
       });
@@ -270,7 +270,7 @@ export async function loadNavigation(token: string): Promise<WorkshopNavigation>
           typeof rawParticipant.kind !== "string" ||
           typeof rawParticipant.display_name !== "string"
         ) {
-          throw new Error("Kai returned unsupported Workshop navigation.");
+          throw new Error("Bjornheim AI returned unsupported Workshop navigation.");
         }
         return {
           displayName: rawParticipant.display_name,
@@ -320,7 +320,7 @@ export async function submitCommand(
   );
   const payload = await responsePayload(response);
   if (!response.ok) {
-    throw new Error(safeErrorMessage(payload, "Kai could not run this command."));
+    throw new Error(safeErrorMessage(payload, "Bjornheim AI could not run this command."));
   }
   if (
     !isRecord(payload) ||
@@ -330,11 +330,11 @@ export async function submitCommand(
     typeof payload.run_id !== "string" ||
     !isRecord(payload.run)
   ) {
-    throw new Error("Kai returned an unsupported command response.");
+    throw new Error("Bjornheim AI returned an unsupported command response.");
   }
   const run = parseRun(payload.run, session.channelId);
   if (!run || run.runId !== payload.run_id) {
-    throw new Error("Kai returned an unsupported command response.");
+    throw new Error("Bjornheim AI returned an unsupported command response.");
   }
   return {
     acceptance: payload.acceptance,
@@ -357,7 +357,7 @@ export async function loadRun(
     throw new Error(safeErrorMessage(payload, "Could not inspect this run."));
   }
   if (!isRecord(payload) || payload.version !== 1 || !run || run.runId !== runId) {
-    throw new Error("Kai returned an unsupported run response.");
+    throw new Error("Bjornheim AI returned an unsupported run response.");
   }
   return run;
 }
@@ -377,7 +377,7 @@ export async function cancelRun(
     throw new Error(safeErrorMessage(payload, "Could not stop this run."));
   }
   if (!isRecord(payload) || payload.version !== 1 || !run || run.runId !== runId) {
-    throw new Error("Kai returned an unsupported cancellation response.");
+    throw new Error("Bjornheim AI returned an unsupported cancellation response.");
   }
   return run;
 }
@@ -414,7 +414,7 @@ export async function loadTimeline(
       !Array.isArray(payload.messages) ||
       !Number.isSafeInteger(payload.through_position)
     ) {
-      throw new Error("Kai returned an unsupported timeline response.");
+      throw new Error("Bjornheim AI returned an unsupported timeline response.");
     }
 
     const pageThroughPosition = payload.through_position as number;
@@ -426,7 +426,7 @@ export async function loadTimeline(
     for (const rawMessage of payload.messages) {
       const message = parseMessage(rawMessage, session.channelId);
       if (!message) {
-        throw new Error("Kai returned an unsupported timeline message.");
+        throw new Error("Bjornheim AI returned an unsupported timeline message.");
       }
       messages.push(message);
     }
@@ -439,7 +439,7 @@ export async function loadTimeline(
   } while (cursor);
 
   if (throughPosition === null) {
-    throw new Error("Kai returned an unsupported timeline response.");
+    throw new Error("Bjornheim AI returned an unsupported timeline response.");
   }
   return { messages, throughPosition };
 }

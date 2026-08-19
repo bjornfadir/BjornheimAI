@@ -152,6 +152,36 @@ class TestWorkshopPrincipalStorageRegistry:
         ):
             registry.for_runtime_config_id(202)
 
+    async def test_resolves_workshop_only_runtime_to_canonical_principal(
+        self,
+        tmp_path: Path,
+    ):
+        store = await _store(tmp_path / "kai.db")
+        profiles = profile_registry(101, 202, 303)
+        try:
+            human = await WorkshopHumanProvisioner(store).provision(
+                "workshop-only-human",
+                "Workshop-only human",
+                "member",
+            )
+            await WorkshopRuntimeAssignmentService(store, profiles).assign(
+                human.principal_id,
+                human.channel_id,
+                profile_id(303),
+            )
+
+            registry = await WorkshopPrincipalStorageRegistry.from_store(store, profiles)
+            namespace = registry.for_runtime_config_id(303)
+
+            assert namespace.principal_id == human.principal_id
+            async with store.connection.execute(
+                "SELECT COUNT(*) FROM channel_bindings WHERE channel_id = ?",
+                (human.channel_id,),
+            ) as cursor:
+                assert int((await cursor.fetchone())[0]) == 0
+        finally:
+            await store.close()
+
 
 class TestWorkshopChannelHistoryRegistry:
     async def test_resolves_transport_and_runtime_keys_to_canonical_channel(

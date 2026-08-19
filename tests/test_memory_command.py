@@ -3038,10 +3038,10 @@ class TestBuildScopeView:
         assert view.source_label == "classifier (confidence 0.80)"
 
     def test_project_row_registered_distinct_display(self):
-        registry = {"kai": _project_cfg("kai", display="Kai Assistant")}
+        registry = {"kai": _project_cfg("kai", display="Bjornheim AI Assistant")}
         fact = _scoped_fact("project", project_id="kai", scope_source="operator")
         view = memory_command._build_scope_view(fact, registry, None)
-        assert view.scope_label == "project 'kai' (Kai Assistant)"
+        assert view.scope_label == "project 'kai' (Bjornheim AI Assistant)"
 
     def test_project_row_unregistered_is_flagged(self):
         fact = _scoped_fact("project", project_id="ghost", scope_source="operator")

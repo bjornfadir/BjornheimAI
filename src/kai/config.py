@@ -92,9 +92,12 @@ VALID_BACKENDS = {"claude", "goose", "codex", "opencode", "pi"}
 # host-owned listener for health, internal APIs, and configured integrations;
 # these names control the human-facing client surfaces attached to that host.
 # Absence of KAI_ENABLED_ADAPTERS deliberately preserves the historic hybrid
-# deployment so upgrades do not silently disable Telegram.
-VALID_CLIENT_ADAPTERS: frozenset[str] = frozenset({"telegram", "workshop"})
-DEFAULT_CLIENT_ADAPTERS: frozenset[str] = VALID_CLIENT_ADAPTERS
+# deployment so upgrades do not silently disable Telegram. Discord is opt-in
+# only (must be named explicitly in KAI_ENABLED_ADAPTERS) - it is NOT part of
+# the default set, so existing installs without a DISCORD_BOT_TOKEN do not
+# start failing at startup after an upgrade.
+VALID_CLIENT_ADAPTERS: frozenset[str] = frozenset({"telegram", "workshop", "discord"})
+DEFAULT_CLIENT_ADAPTERS: frozenset[str] = frozenset({"telegram", "workshop"})
 
 
 def parse_enabled_adapters(value: str | None) -> frozenset[str]:
@@ -304,7 +307,7 @@ CODEX_MODELS: dict[str, str] = {
 }
 
 # One-release compatibility for the invalid GPT-5.6 family shorthand
-# Kai briefly offered. Keep aliases out of CODEX_MODELS so new model
+# Bjornheim AI briefly offered. Keep aliases out of CODEX_MODELS so new model
 # pickers and validators expose only IDs accepted by Codex. Callers
 # that ingest persisted operator state canonicalize before validating.
 _LEGACY_CODEX_MODEL_ALIASES: dict[str, str] = {
@@ -376,6 +379,13 @@ class ModelRole(StrEnum):
     # are runtime-only (no env-var override surface, no Config field).
     MEMORY_EXTRACTION = "memory_extraction"
     MEMORY_EPISODE = "memory_episode"
+    # Safety-flagging classifier for monitored (guardian-supervised) users'
+    # turns. Same "cheap" tier as memory extraction - this call sits in a
+    # background hook after the turn is already delivered, not on the
+    # user's response latency, but it should still stay cheap since it
+    # can fire on every monitored-user turn that clears the keyword
+    # pre-filter (see workshop/safety_classifier.py).
+    SAFETY_CLASSIFICATION = "safety_classification"
 
 
 # Per-role tier assignment. Roles that need reasoning depth (PR
@@ -391,6 +401,7 @@ _TIER_BY_ROLE: dict[ModelRole, str] = {
     ModelRole.ISSUE_TRIAGE: "balanced",
     ModelRole.MEMORY_EXTRACTION: "cheap",
     ModelRole.MEMORY_EPISODE: "cheap",
+    ModelRole.SAFETY_CLASSIFICATION: "cheap",
     ModelRole.BEHAVIORAL_JUDGE: "cheap",
     ModelRole.BEHAVIORAL_GEN: "balanced",
 }
@@ -510,9 +521,9 @@ _BACKEND_PROVIDER_TIER_MODELS[("pi", "openrouter")] = {
 }
 
 # Pi's subscription providers are authenticated per target OS user through
-# `pi` -> `/login`. These are curated startup/automation defaults only; Kai's
+# `pi` -> `/login`. These are curated startup/automation defaults only; Bjornheim AI's
 # `/model` input remains open-ended so a Pi upgrade can expose new models
-# without requiring a Kai release. IDs below are present in Pi 0.79.9.
+# without requiring a Bjornheim AI release. IDs below are present in Pi 0.79.9.
 _BACKEND_PROVIDER_TIER_MODELS[("pi", "openai-codex")] = {
     "agent": "openai-codex/gpt-5.5",
     "balanced": "openai-codex/gpt-5.5",
@@ -706,7 +717,7 @@ def get_effective_provider(backend: str, llm_provider: str) -> str:
     openai). Goose consults the raw llm_provider because it routes to
     whatever provider the user configured. OpenCode also returns the
     raw llm_provider: the provider lives inside the full `provider/model`
-    string OpenCode resolves at runtime, so Kai's effective_provider
+    string OpenCode resolves at runtime, so Bjornheim AI's effective_provider
     is informational (used for shadow recall logging metadata and the
     /stats display) rather than load-bearing for OpenCode dispatch.
 
@@ -785,7 +796,7 @@ def is_opencode_model_shape(model: str) -> bool:
     """Structural check: OpenCode model IDs are `provider_id/model_id`.
 
     OpenCode resolves models against its own provider registry at
-    runtime; Kai cannot enumerate the supported set (75+ providers
+    runtime; Bjornheim AI cannot enumerate the supported set (75+ providers
     via AI SDK and Models.dev, varying by what the operator has
     authenticated through `opencode auth login`). What IS knowable
     upfront is the structural contract documented at
@@ -800,7 +811,7 @@ def is_opencode_model_shape(model: str) -> bool:
     OpenCodeBackend.build_env, where it becomes
     `OPENCODE_CONFIG_CONTENT='{"model": "sonnet"}'` and OpenCode
     fails model resolution at handshake time with no clear pointer
-    back to the Kai-side typo.
+    back to the Bjornheim AI-side typo.
     """
     if not model:
         return False
@@ -823,9 +834,9 @@ def is_opencode_model_shape(model: str) -> bool:
 def is_pi_model_shape(model: str, provider: str = "") -> bool:
     """Validate Pi's `provider/model[:thinking]` selection shape.
 
-    Pi resolves the installed/authenticated model set at runtime, so Kai
+    Pi resolves the installed/authenticated model set at runtime, so Bjornheim AI
     cannot maintain an accurate static allowlist. The provider prefix is
-    still load-bearing: it must be present and, when Kai has an effective
+    still load-bearing: it must be present and, when Bjornheim AI has an effective
     provider, must agree with that provider. Colons remain valid inside
     model IDs (notably Ollama tags); Pi itself distinguishes an optional
     recognized thinking suffix from the underlying model ID.
@@ -977,6 +988,18 @@ def validate_model_for_backend(model: str, backend: str, eff_provider: str) -> b
 # lookup, and a multi-key fallback chain warns distinctly for each
 # legacy name it encounters.
 _renamed_key_deprecation_warned: set[tuple[str, str]] = set()
+
+
+def _parse_positive_id(raw: int | str | float | None, field_name: str) -> int | None:
+    """Parse an optional positive-integer transport id (telegram_id/discord_id)."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError(f"{field_name} must be an integer, not a boolean")
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return value
 
 
 def _resolve_renamed_key(
@@ -1311,7 +1334,10 @@ class UserConfig:
     baselines that users can override within boundaries.
 
     Attributes:
-        telegram_id: Telegram user ID (authorization key).
+        telegram_id: Telegram user ID (authorization key). Optional when
+            discord_id is set instead; at least one of the two is required.
+        discord_id: Discord user snowflake ID (authorization key for DMs).
+            Optional when telegram_id is set instead.
         name: Display name for logs and notifications.
         role: "admin" or "user". Admins receive unattributed webhooks.
         github: GitHub username for webhook actor routing.
@@ -1322,17 +1348,27 @@ class UserConfig:
         workspace_base: Base directory for /workspace new and name resolution.
             Falls back to global WORKSPACE_BASE env var if not set.
         github_repos: Admin-controlled repositories this user may access
-            through Kai's shared GitHub review and triage authority. The
+            through Bjornheim AI's shared GitHub review and triage authority. The
             mutable notification subscription list cannot expand this set.
         allowed_triage_projects: Admin-controlled GitHub Project titles that
             issue triage may add issues to. Empty means project assignment is
             disabled for this user.
         allowed_services: External proxy service names this user's persistent
             agent may call. Empty by default, including for admins.
+        guardian_of: Names of other users.yaml entries this user is an
+            authorized guardian of. Config-driven authorization only -
+            see workshop/guardian_access.py. Does not require the target
+            to have monitored=True; that flag is a separate signal for
+            the safety-flagging pipeline, not a gate on guardian reads.
+        monitored: Whether this user's conversations should be evaluated
+            by the safety-flagging pipeline. A monitored user with no
+            guardian_of them configured on any other user simply has no
+            one to alert - not an error.
     """
 
-    telegram_id: int
     name: str
+    telegram_id: int | None = None
+    discord_id: int | None = None
     role: str = "user"
     github: str | None = None
     os_user: str | None = None
@@ -1368,10 +1404,17 @@ class UserConfig:
     # Admin-controlled and fail-closed: omission means triage can still
     # comment/label, but cannot mutate project boards.
     allowed_triage_projects: list[str] = field(default_factory=list)
-    # External services the persistent agent may call through Kai's
+    # External services the persistent agent may call through Bjornheim AI's
     # credential-injecting proxy. Admin-controlled via users.yaml and
     # fail-closed: omission means no services, including for admins.
     allowed_services: list[str] = field(default_factory=list)
+    # Guardian monitoring fields. guardian_of lists other users.yaml
+    # `name` values this user may read via workshop/guardian_access.py.
+    # monitored flags this user's turns for the safety-flagging pipeline.
+    # Independent knobs: an admin can grant guardian_of without setting
+    # monitored on the target, and vice versa.
+    guardian_of: list[str] = field(default_factory=list)
+    monitored: bool = False
     # Per-role per-user model overrides loaded from users.yaml `models:`.
     # Keys are role identifiers: "agent" for the conversational role
     # plus every ModelRole.value ("pr_review", "issue_triage",
@@ -1385,6 +1428,18 @@ class UserConfig:
     # gets `models["agent"] = model_value` synthesized at load time
     # so existing users.yaml files keep working unchanged.
     models: dict[str, str] | None = None
+
+    @property
+    def config_id(self) -> int:
+        """The canonical per-user key into ``Config.user_configs``.
+
+        telegram_id when set (preserves every pre-Discord call site's
+        assumption that this key IS the Telegram id); otherwise discord_id.
+        Parsing guarantees at least one is set, so this never returns None.
+        """
+        canonical = self.telegram_id if self.telegram_id is not None else self.discord_id
+        assert canonical is not None, "UserConfig must have telegram_id or discord_id"
+        return canonical
 
     def authorizes_github_repo(self, repo: str) -> bool:
         """Return whether shared-identity GitHub operations may target ``repo``.
@@ -1414,8 +1469,8 @@ class Config:
         telegram_bot_token: Bot token from @BotFather. Required only when the
             Telegram adapter is enabled.
         telegram_webhook_url: Public URL where Telegram pushes updates via webhook.
-            When set, Kai runs in webhook mode (Telegram POSTs updates here).
-            When None, Kai falls back to long-polling (Kai pulls updates from Telegram).
+            When set, Bjornheim AI runs in webhook mode (Telegram POSTs updates here).
+            When None, Bjornheim AI falls back to long-polling (Bjornheim AI pulls updates from Telegram).
         telegram_webhook_secret: Secret token for validating incoming Telegram updates.
             Sent by Telegram as X-Telegram-Bot-Api-Secret-Token header on each update.
             Only used in webhook mode. Generated for the process when not explicitly set.
@@ -1445,6 +1500,19 @@ class Config:
     # Telegram credentials are optional for Workshop-only deployments.
     telegram_bot_token: str | None
     allowed_user_ids: set[int]
+
+    # Discord credentials are optional unless the discord adapter is enabled.
+    # allowed_discord_user_ids gates discord_bot.py's DM auth the same way
+    # allowed_user_ids gates Telegram - built from users.yaml discord_id
+    # entries, not the Telegram-keyed field above.
+    discord_bot_token: str | None = None
+    allowed_discord_user_ids: set[int] = field(default_factory=set)
+    # Secondary index: discord_id -> UserConfig, for users whose canonical
+    # user_configs key is their telegram_id (hybrid users) or who are
+    # discord-only (where this duplicates the user_configs entry under a
+    # second, discord-keyed lookup). Populated for every user with a
+    # discord_id set; see UserConfig.config_id.
+    user_configs_by_discord_id: dict[int, UserConfig] = field(default_factory=dict)
 
     # Explicit human-facing adapter policy. The default preserves the client
     # surfaces used by installations created before this policy existed.
@@ -1604,6 +1672,10 @@ class Config:
     def workshop_enabled(self) -> bool:
         return "workshop" in self.enabled_adapters
 
+    @property
+    def discord_enabled(self) -> bool:
+        return "discord" in self.enabled_adapters
+
     # TOTP two-factor authentication timing (only relevant when TOTP is enabled)
     totp_session_minutes: int = 30
     totp_challenge_seconds: int = 120
@@ -1616,7 +1688,7 @@ class Config:
     default_backend: str = ""
 
     # LLM provider for non-Claude backends (e.g. Goose). Determines
-    # which API key env var the backend expects and whether Kai's
+    # which API key env var the backend expects and whether Bjornheim AI's
     # logical model names ("sonnet", "opus") are translated to Anthropic IDs.
     # Ignored when default_backend="claude".
     default_provider: str = ""
@@ -1707,7 +1779,7 @@ class Config:
     # the "one knob, two paths" decision: keeping the UI floor and
     # the context-injection floor in lockstep prevents silent
     # divergence between "what the user sees in /memory search" and
-    # "what Kai pulls into context" after a config change.
+    # "what Bjornheim AI pulls into context" after a config change.
     memory_search_floor: float = 0.3
 
     # Write-time semantic-similarity dedup threshold. The extractor's
@@ -1734,8 +1806,12 @@ class Config:
         return self.workspace_configs.get(workspace.resolve())
 
     def get_user_config(self, user_id: int) -> UserConfig | None:
-        """Get per-user config by Telegram user ID, or None if not configured."""
+        """Get per-user config by canonical config id, or None if not configured."""
         return self.user_configs.get(user_id)
+
+    def get_user_config_by_discord(self, discord_id: int) -> UserConfig | None:
+        """Get per-user config by Discord user ID, or None if not configured."""
+        return self.user_configs_by_discord_id.get(discord_id)
 
     def get_user_by_github(self, github_login: str) -> UserConfig | None:
         """Look up a user by GitHub username. Used for webhook actor routing."""
@@ -2545,35 +2621,46 @@ def _load_user_configs(
         raise SystemExit(f"{users_yaml_path}: no 'users' key found; check for typos (e.g. 'user:' vs 'users:')")
 
     configs: dict[int, UserConfig] = {}
+    discord_index: dict[int, UserConfig] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             log.warning("users.yaml: skipping non-dict entry: %s", entry)
             continue
 
-        # Validate required telegram_id (must be a positive integer, not a bool)
-        raw_id = entry.get("telegram_id")
-        if raw_id is None:
-            log.warning("users.yaml: skipping entry without telegram_id")
+        # At least one of telegram_id/discord_id is required (authorization
+        # key). Both are optional individually so a user can be Discord-only
+        # or Telegram-only.
+        try:
+            telegram_id = _parse_positive_id(entry.get("telegram_id"), "telegram_id")
+        except (TypeError, ValueError) as e:
+            log.warning("users.yaml: invalid telegram_id %s: %s; skipping entry", entry.get("telegram_id"), e)
             continue
         try:
-            if isinstance(raw_id, bool):
-                raise ValueError("must be an integer, not a boolean")
-            telegram_id = int(raw_id)
-            if telegram_id <= 0:
-                raise ValueError("must be positive")
+            discord_id = _parse_positive_id(entry.get("discord_id"), "discord_id")
         except (TypeError, ValueError) as e:
-            log.warning("users.yaml: invalid telegram_id %s: %s; skipping entry", raw_id, e)
+            log.warning("users.yaml: invalid discord_id %s: %s; skipping entry", entry.get("discord_id"), e)
+            continue
+        if telegram_id is None and discord_id is None:
+            log.warning("users.yaml: skipping entry without telegram_id or discord_id")
             continue
 
         # Validate required name (strip first so whitespace-only is rejected)
         name = str(entry.get("name") or "").strip()
         if not name:
-            log.warning("users.yaml: skipping entry for telegram_id %d without name", telegram_id)
+            log.warning(
+                "users.yaml: skipping entry for telegram_id=%s discord_id=%s without name",
+                telegram_id,
+                discord_id,
+            )
             continue
 
-        # Duplicate check: first wins
-        if telegram_id in configs:
+        # Duplicate check: first wins. telegram_id and discord_id are each
+        # independently unique across entries.
+        if telegram_id is not None and telegram_id in configs:
             log.warning("users.yaml: duplicate telegram_id %d; using first entry", telegram_id)
+            continue
+        if discord_id is not None and discord_id in discord_index:
+            log.warning("users.yaml: duplicate discord_id %d; using first entry", discord_id)
             continue
 
         # Validate role
@@ -2956,6 +3043,56 @@ def _load_user_configs(
                     raw_triage,
                 )
 
+        # Parse optional guardian_of list (names of other users.yaml
+        # entries this user may read via guardian_access.py). Names are
+        # cross-checked for existence in a second pass below, once every
+        # entry in this file has been parsed - a forward reference to a
+        # user defined later in the same file must not be rejected here.
+        raw_guardian_of = entry.get("guardian_of", [])
+        guardian_of: list[str] = []
+        if isinstance(raw_guardian_of, list):
+            for raw_target in raw_guardian_of:
+                if not isinstance(raw_target, str):
+                    log.warning(
+                        "users.yaml: invalid guardian_of entry for %s: %r (expected a user name)",
+                        name,
+                        raw_target,
+                    )
+                    continue
+                target_name = raw_target.strip()
+                if not target_name:
+                    log.warning(
+                        "users.yaml: invalid guardian_of entry for %s: %r (blank names are not allowed)",
+                        name,
+                        raw_target,
+                    )
+                    continue
+                if target_name == name:
+                    log.warning(
+                        "users.yaml: guardian_of for %s lists itself; ignoring",
+                        name,
+                    )
+                    continue
+                if target_name not in guardian_of:
+                    guardian_of.append(target_name)
+        else:
+            log.warning(
+                "users.yaml: guardian_of for %s must be a list (ignoring)",
+                name,
+            )
+
+        monitored = False
+        raw_monitored = entry.get("monitored")
+        if raw_monitored is not None:
+            if isinstance(raw_monitored, bool):
+                monitored = raw_monitored
+            else:
+                log.warning(
+                    "users.yaml: monitored for %s must be true or false: %s",
+                    name,
+                    raw_monitored,
+                )
+
         # Per-role per-user model overrides (`models:` sub-map). Keys
         # are "agent" plus any ModelRole.value; values are model strings
         # the user's backend's CLI accepts. Validation mirrors the
@@ -3003,8 +3140,9 @@ def _load_user_configs(
         if user_models is None and model is not None:
             user_models = {"agent": model}
 
-        configs[telegram_id] = UserConfig(
+        new_user_config = UserConfig(
             telegram_id=telegram_id,
+            discord_id=discord_id,
             name=name,
             role=role,
             github=github,
@@ -3022,8 +3160,13 @@ def _load_user_configs(
             issue_triage=issue_triage,
             allowed_triage_projects=allowed_triage_projects,
             allowed_services=allowed_services,
+            guardian_of=guardian_of,
+            monitored=monitored,
             models=user_models,
         )
+        configs[new_user_config.config_id] = new_user_config
+        if discord_id is not None:
+            discord_index[discord_id] = new_user_config
 
     if not configs:
         raise SystemExit(
@@ -3031,6 +3174,22 @@ def _load_user_configs(
             "by per-entry validation. See the warnings logged above for the "
             "individual rejection reasons."
         )
+
+    # guardian_of forward-reference check: now that every entry in the
+    # file has been parsed, warn (don't fail closed) about names that
+    # don't match any configured user. Kept as a warning rather than
+    # SystemExit because a typo'd or since-removed name shouldn't take
+    # down config load for an otherwise-valid install; guardian_access.py
+    # fails closed on its own at resolution time regardless.
+    known_names = {uc.name for uc in configs.values()}
+    for uc in configs.values():
+        for target_name in uc.guardian_of:
+            if target_name not in known_names:
+                log.warning(
+                    "users.yaml: guardian_of for %s references unknown user %r",
+                    uc.name,
+                    target_name,
+                )
 
     # Warn if no admin is defined - external webhooks will route to
     # an arbitrary user, which may be surprising.
@@ -3092,8 +3251,8 @@ def load_config() -> Config:
 
     # Telegram transport mode: if TELEGRAM_WEBHOOK_URL is set, use webhook mode
     # (Telegram POSTs updates to this URL). If unset, fall back to long-polling
-    # (Kai pulls updates from Telegram). This lets users without a tunnel/proxy
-    # run Kai out of the box.
+    # (Bjornheim AI pulls updates from Telegram). This lets users without a tunnel/proxy
+    # run Bjornheim AI out of the box.
     telegram_webhook_url: str | None = None
     telegram_webhook_secret: str | None = None
     raw_webhook_url = os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip()
@@ -3112,6 +3271,16 @@ def load_config() -> Config:
         log.info("Telegram transport: polling (TELEGRAM_WEBHOOK_URL not set)")
     else:
         log.info("Telegram adapter disabled by KAI_ENABLED_ADAPTERS")
+
+    # Discord credentials are adapter configuration, not host credentials -
+    # same shape as the Telegram block above. Discord is DM-gateway-only
+    # (no webhook/polling mode distinction; the adapter holds one persistent
+    # gateway connection), so there is no equivalent of TELEGRAM_WEBHOOK_URL.
+    discord_enabled = "discord" in enabled_adapters
+    stored_discord_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or None
+    discord_token = stored_discord_token if discord_enabled else None
+    if discord_enabled and discord_token is None:
+        raise SystemExit("DISCORD_BOT_TOKEN is required when the Discord adapter is enabled")
 
     # Validate optional: workspace base directory (must exist if provided)
     workspace_base = None
@@ -3524,7 +3693,7 @@ def load_config() -> Config:
             user_configs = _load_user_configs(default_backend, default_provider, users_yaml_path)
     if protected_env and user_configs:
         # A protected install gives the outer service account narrowly
-        # scoped sudo access to root-owned Kai configuration.  A persistent
+        # scoped sudo access to root-owned Bjornheim AI configuration.  A persistent
         # conversational agent running as that same account would inherit
         # those capabilities even though its environment is sanitized.
         # Fail at startup if a hand-edited users.yaml weakens the boundary.
@@ -3532,11 +3701,11 @@ def load_config() -> Config:
             service_user = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             raise SystemExit(
-                f"Protected installation could not resolve the Kai service account for effective uid {os.geteuid()}."
+                f"Protected installation could not resolve the Bjornheim AI service account for effective uid {os.geteuid()}."
             ) from None
         try:
             validate_protected_user_isolation(
-                ((uc.telegram_id, uc.name, uc.os_user) for uc in user_configs.values()),
+                ((uc.config_id, uc.name, uc.os_user) for uc in user_configs.values()),
                 service_user,
                 account_uid=lambda name: pwd.getpwnam(name).pw_uid,
                 service_uid=os.geteuid(),
@@ -3551,7 +3720,14 @@ def load_config() -> Config:
     # truth for per-role selection. One-shot deprecation warning
     # fires inside the helper when any seed value applies.
     user_configs = _apply_legacy_model_env_overrides(user_configs, default_backend)
-    allowed_ids = set(user_configs.keys())
+    # user_configs is keyed by UserConfig.config_id (telegram_id when set,
+    # else discord_id) - NOT necessarily a Telegram id, so allowed_user_ids
+    # (Telegram auth) and allowed_discord_user_ids (Discord auth) are each
+    # rebuilt from the field that actually names that transport's identity,
+    # not from the dict's keys.
+    allowed_ids = {uc.telegram_id for uc in user_configs.values() if uc.telegram_id is not None}
+    allowed_discord_ids = {uc.discord_id for uc in user_configs.values() if uc.discord_id is not None}
+    discord_user_configs = {uc.discord_id: uc for uc in user_configs.values() if uc.discord_id is not None}
     if os.environ.get("ALLOWED_USER_IDS", "").strip():
         log.warning(
             "ALLOWED_USER_IDS is set in env but is no longer honored; "
@@ -3752,6 +3928,9 @@ def load_config() -> Config:
         telegram_webhook_url=telegram_webhook_url,
         telegram_webhook_secret=telegram_webhook_secret,
         allowed_user_ids=allowed_ids,
+        discord_bot_token=discord_token,
+        allowed_discord_user_ids=allowed_discord_ids,
+        user_configs_by_discord_id=discord_user_configs,
         enabled_adapters=enabled_adapters,
         default_model=default_model,
         default_models=default_models,

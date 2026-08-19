@@ -1,4 +1,4 @@
-"""Operator-invoked qualification commands for Kai Workshop."""
+"""Operator-invoked qualification commands for Bjornheim AI Workshop."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     actions = qualification.add_subparsers(dest="action", required=True)
 
-    prepare = actions.add_parser("prepare", help="queue the latest canonical Kai reply without sending it")
+    prepare = actions.add_parser("prepare", help="queue the latest canonical Bjornheim AI reply without sending it")
     prepare.add_argument("--telegram-user-id", required=True, type=int)
 
     prepare_group = actions.add_parser(
@@ -207,12 +207,14 @@ def _qualification_database(data_dir: Path) -> Path:
         metadata = database.lstat()
     except FileNotFoundError as exc:
         raise DeliveryQualificationError(
-            "The deployed Kai database was not found; set KAI_DATA_DIR to the deployed data directory"
+            "The deployed Bjornheim AI database was not found; set KAI_DATA_DIR to the deployed data directory"
         ) from exc
     if not stat.S_ISREG(metadata.st_mode):
-        raise DeliveryQualificationError("The deployed Kai database is not a regular file")
+        raise DeliveryQualificationError("The deployed Bjornheim AI database is not a regular file")
     if metadata.st_uid != os.geteuid():
-        raise DeliveryQualificationError("Run this command as the OS account that owns the deployed Kai database")
+        raise DeliveryQualificationError(
+            "Run this command as the OS account that owns the deployed Bjornheim AI database"
+        )
     return database
 
 
@@ -257,7 +259,7 @@ async def _run(args: argparse.Namespace) -> int:
                 for profile in profiles:
                     print(f"Runtime profile: {profile.profile_id}")
                     print(f"Runtime name: {profile.display_name}")
-                    print(f"OS user: {profile.os_user or 'Kai service account'}")
+                    print(f"OS user: {profile.os_user or 'Bjornheim AI service account'}")
                     print(f"Backend: {profile.backend}")
                     print(f"Provider: {profile.provider}")
                 return 0
@@ -291,7 +293,7 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"Channel: {issued.channel_id}")
                 print(f"Expires: {issued.grant.expires_at.isoformat()}")
                 print(f"Token: {issued.grant.token}")
-                print("The token is shown once; Kai stores only its hash.")
+                print("The token is shown once; Bjornheim AI stores only its hash.")
                 return 0
             if args.action == "revoke-device":
                 device_id = _device_id(args.device_id)

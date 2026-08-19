@@ -71,7 +71,7 @@ class TestWorkshopHumanProvisioner:
                 assert (await cursor.fetchone())[0] == 0
             async with store.connection.execute(
                 "SELECT COUNT(*) FROM channel_agents ca "
-                "JOIN agents a ON a.id = ca.agent_id AND a.name = 'Kai' "
+                "JOIN agents a ON a.id = ca.agent_id AND a.name = 'Bjornheim AI' "
                 "JOIN channel_memberships cm ON cm.channel_id = ca.channel_id "
                 "AND cm.principal_id = a.principal_id AND cm.role = 'participant' "
                 "WHERE ca.channel_id = ?",
@@ -167,7 +167,7 @@ class TestWorkshopHumanProvisioner:
             async with store.connection.execute("SELECT COUNT(*) FROM principals") as cursor:
                 before_principals = (await cursor.fetchone())[0]
 
-            with pytest.raises(WorkshopHumanProvisioningError, match="canonical Kai agent"):
+            with pytest.raises(WorkshopHumanProvisioningError, match="canonical Bjornheim AI agent"):
                 await WorkshopHumanProvisioner(store).provision(
                     "charlie",
                     "Charlie",

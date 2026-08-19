@@ -1,4 +1,4 @@
-"""Profile-addressed writes to Kai's remaining compatibility state."""
+"""Profile-addressed writes to Bjornheim AI's remaining compatibility state."""
 
 from __future__ import annotations
 

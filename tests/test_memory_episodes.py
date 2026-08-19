@@ -113,7 +113,7 @@ def _valid_episode() -> dict:
         "outcome": "Identified payload size as the dominant cost driver; reduced the assistant cap from 1000 to 500 chars.",
         "outcome_quality": "success",
         "tags": ["memory", "extraction", "performance"],
-        "actors": ["user", "Kai"],
+        "actors": ["user", "Bjornheim AI"],
     }
 
 
@@ -665,7 +665,7 @@ class TestStage2Storage:
 
     @pytest.mark.asyncio
     async def test_episode_stored_with_full_sophia_fields(self, monkeypatch):
-        """Every Sophia required field plus the Kai `actors` extension
+        """Every Sophia required field plus the Bjornheim AI `actors` extension
         round-trips into Mem0 metadata. Asserted on the captured
         add_structured kwargs because that is the storage contract."""
         captured: dict = {}
@@ -1003,7 +1003,7 @@ class TestEpisodeRetrieval:
                         "context": "...",
                         "approach": "...",
                         "tags": ["memory"],
-                        "actors": ["user", "Kai"],
+                        "actors": ["user", "Bjornheim AI"],
                     },
                     "created_at": "2026-04-23T10:00:00",
                 },

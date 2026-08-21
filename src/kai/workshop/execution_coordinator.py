@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
 
 from kai.agent_failure import AgentFailureKind
@@ -430,7 +432,7 @@ class WorkshopCanonicalExecutionCoordinator:
                     )
                 active.claim = renewed.claim
 
-    async def _prompt(self, run: DurableRun) -> str:
+    async def _prompt(self, run: DurableRun) -> str | list[dict]:
         async with (
             self._database_lock,
             self._store.connection.execute(
@@ -441,7 +443,55 @@ class WorkshopCanonicalExecutionCoordinator:
             row = await cursor.fetchone()
         if row is None:
             raise RunExecutionConflictError("Durable run no longer resolves its canonical prompt")
-        return str(row[0])
+        body = str(row[0])
+
+        # Image artifacts (e.g. a Discord attachment) are recorded separately
+        # from the message body - see WorkshopPrivateTextExecutionService.
+        # record_inbound_artifact(). Fold any into a multi-modal content
+        # list; plain text-only messages are unaffected.
+        async with (
+            self._database_lock,
+            self._store.connection.execute(
+                "SELECT media_type, storage_path FROM artifacts "
+                "WHERE message_id = ? AND kind = 'photo' ORDER BY created_at",
+                (run.inbound_message_id,),
+            ) as cursor,
+        ):
+            image_rows = list(await cursor.fetchall())
+        if not image_rows:
+            return body
+
+        content: list[dict] = [{"type": "text", "text": body}]
+        for media_type, storage_path in image_rows:
+            try:
+                raw = Path(str(storage_path)).read_bytes()
+            except OSError as exc:
+                raise RunExecutionConflictError(f"Durable run's image artifact is unreadable: {exc}") from exc
+            # Every Telegram upload path (bot.py's handle_photo, image
+            # documents, other documents) appends this exact "[File saved
+            # to: ...]" marker alongside the inline content block - the
+            # Discord path originally sent only the inline block and
+            # dropped the marker, which reads fine on a session's first
+            # turn but not reliably on a continuing turn (confirmed in
+            # production 2026-08-20: first image in a session read
+            # correctly, a second image in the same session got "I don't
+            # see an image attached... no file path came through with
+            # it" from Claude itself, despite the artifact and inline
+            # block both being present and correct in the database).
+            # Matching Telegram's convention exactly rather than guessing
+            # at why the inline block alone is unreliable.
+            content.append({"type": "text", "text": f"[File saved to: {storage_path}]"})
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": str(media_type),
+                        "data": base64.b64encode(raw).decode(),
+                    },
+                }
+            )
+        return content
 
     async def _run(self, run_id: RunId) -> DurableRun:
         async with self._database_lock:

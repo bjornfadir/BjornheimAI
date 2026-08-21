@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kai.workshop.artifacts import InboundArtifact, record_inbound_artifact
 from kai.workshop.conversation_commands import (
     ClientConversationCommandAcceptance,
     ConversationCommandAcceptance,
@@ -24,7 +25,7 @@ from kai.workshop.inbound import ClientInboundMessage, InboundMessage
 from kai.workshop.protected_execution import WorkshopProtectedExecutionPreparationService
 from kai.workshop.run_lifecycle import WorkshopRunLifecycle
 from kai.workshop.runtime_pool import WorkshopRuntimePool
-from kai.workshop.store import WorkshopEventStore
+from kai.workshop.store import AppendResult, WorkshopEventStore
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,22 @@ class WorkshopPrivateTextExecutionService:
         async with self._database_lock:
             return await self._command_service.accept_client(message)
 
+    async def record_inbound_artifact(
+        self,
+        artifact: InboundArtifact,
+        *,
+        storage_root: Path,
+    ) -> AppendResult:
+        """Attach one durable media object (e.g. an image) to an already-
+        accepted message, under the same lock as every other write to this
+        store. Must be called after accept()/accept_client() returns for the
+        artifact's message_id and before execute() is called for its run, so
+        _prompt() sees the artifact when it builds the turn's content."""
+        if self._closed:
+            raise RuntimeError("Workshop private-text execution service is closed")
+        async with self._database_lock:
+            return await record_inbound_artifact(self._store, artifact, storage_root=storage_root)
+
     async def execute(
         self,
         run_id: RunId,
@@ -172,7 +189,22 @@ class WorkshopPrivateTextExecutionService:
             return await WorkshopRunLifecycle(self._store).state(run_id)
 
     async def recoverable_client_runs(self) -> tuple[RecoverableClientRun, ...]:
-        """Find browser runs that are durably accepted and safe to dispatch."""
+        """Find accepted-but-never-attempted runs that are safe to dispatch.
+
+        Originally scoped to 'workshop_client' (browser) only, on the
+        assumption that bot transports (Discord/Telegram) always call
+        execute() synchronously right after accept() within the same
+        request handler, so they'd never need this net. That assumption
+        breaks if the process dies between accept() committing and
+        execute() being called (e.g. a crash or a forced restart mid-turn)
+        - the run is then durably 'accepted' with no run_attempt and, with
+        the old bot-excluding filter, unrecoverable forever (confirmed via
+        a Discord run stuck in this exact state for 9+ hours on
+        2026-08-20). Recovering a bot-transport run here still only
+        settles it to a terminal state in the database; it does not
+        redeliver a reply over Discord/Telegram, since no channel/message
+        handle is available in this recovery path.
+        """
         if self._closed:
             raise RuntimeError("Workshop private-text execution service is closed")
         async with (
@@ -185,7 +217,8 @@ class WorkshopPrivateTextExecutionService:
                 "JOIN channel_agent_runtime_assignments ra "
                 "ON ra.channel_id = r.channel_id AND ra.agent_id = r.agent_id "
                 "WHERE r.status = 'accepted' AND r.cancellation_requested_at IS NULL "
-                "AND json_extract(e.metadata_json, '$.source') = 'workshop_client' "
+                "AND json_extract(e.metadata_json, '$.source') IN "
+                "('workshop_client', 'discord', 'telegram') "
                 "AND NOT EXISTS (SELECT 1 FROM run_attempts a WHERE a.run_id = r.id "
                 "AND a.status IN ('granted', 'started')) "
                 "ORDER BY r.accepted_at, r.id"

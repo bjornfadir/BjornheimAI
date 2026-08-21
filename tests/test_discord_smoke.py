@@ -27,11 +27,14 @@ the Discord delivery worker) is the real production object.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import kai.bot as bot_module
 import kai.discord_adapter as discord_adapter_module
+import kai.discord_bot as discord_bot_module
 import kai.workshop.guardian_transcript as guardian_transcript_module
 import kai.workshop.safety_classifier as safety_classifier_module
 from kai import sessions
@@ -144,16 +147,37 @@ class _FakeAuthor:
         self.bot = False
 
 
+class _FakeAttachment:
+    """Stands in for discord.Attachment: only what _handle_dm_text touches."""
+
+    def __init__(self, *, attachment_id: int, filename: str, content_type: str, data: bytes) -> None:
+        self.id = attachment_id
+        self.filename = filename
+        self.content_type = content_type
+        self._data = data
+
+    async def read(self) -> bytes:
+        return self._data
+
+
 class _FakeInboundMessage:
     """Stands in for discord.Message: only the attributes _handle_dm_text touches."""
 
-    def __init__(self, user: _FakeDiscordUser, content: str, msg_id: int) -> None:
+    def __init__(
+        self,
+        user: _FakeDiscordUser,
+        content: str,
+        msg_id: int,
+        *,
+        attachments: list[_FakeAttachment] | None = None,
+    ) -> None:
         self.author = _FakeAuthor(user)
         self.guild = None
         self.content = content
         self.id = msg_id
         self.created_at = datetime.now(UTC)
         self.channel = user.dm_channel
+        self.attachments: list[_FakeAttachment] = list(attachments or [])
 
 
 class _FakeDiscordClientHandle:
@@ -168,9 +192,10 @@ class _FakeDiscordClientHandle:
 
 
 class _FakeRuntime:
-    def __init__(self) -> None:
+    def __init__(self, received_prompts: list[object] | None = None) -> None:
         self.selection = PreparedBackendSelection(backend="codex", provider="openai", model="gpt-5.6-sol")
         self.workspace = Path("/tmp")
+        self._received_prompts = received_prompts
 
     def validate_current(self) -> None:
         return None
@@ -178,16 +203,14 @@ class _FakeRuntime:
     async def cancel(self) -> None:
         return None
 
-    async def stream(self, _prompt: object):
+    async def stream(self, prompt: object):
+        if self._received_prompts is not None:
+            self._received_prompts.append(prompt)
         yield StreamEvent(
             text_so_far=_FAKE_REPLY,
             done=True,
             response=AgentResponse(success=True, text=_FAKE_REPLY, session_id="fake-session", duration_ms=1),
         )
-
-
-async def _fake_prepare_execution(_self: SubprocessPool, _chat_id: int) -> _FakeRuntime:
-    return _FakeRuntime()
 
 
 # ── Fake LLM calls (the third real edge) ─────────────────────────────────
@@ -218,11 +241,19 @@ class _FakeSummaryReasoner:
 
 
 class _Stack:
-    def __init__(self, host: KaiApplicationHost, adapter: DiscordAdapter, config: Config, users: dict[int, _FakeDiscordUser]):
+    def __init__(
+        self,
+        host: KaiApplicationHost,
+        adapter: DiscordAdapter,
+        config: Config,
+        users: dict[int, _FakeDiscordUser],
+        received_prompts: list[object],
+    ):
         self.host = host
         self.adapter = adapter
         self.config = config
         self.users = users
+        self.received_prompts = received_prompts
 
     def client_handle(self) -> _FakeDiscordClientHandle:
         return _FakeDiscordClientHandle(self.config, self.host.services)
@@ -233,7 +264,20 @@ class _Stack:
 
 
 async def _build_stack(tmp_path: Path, monkeypatch) -> _Stack:
+    received_prompts: list[object] = []
+
+    async def _fake_prepare_execution(_self: SubprocessPool, _chat_id: int) -> _FakeRuntime:
+        return _FakeRuntime(received_prompts)
+
     monkeypatch.setattr(SubprocessPool, "prepare_execution", _fake_prepare_execution)
+    # discord_bot.py and bot.py each bound DATA_DIR by value at import time
+    # (`from kai.config import DATA_DIR`); patching kai.config.DATA_DIR alone
+    # would not reach either already-imported name, so both call sites that
+    # _save_upload touches need patching directly to keep image-attachment
+    # tests writing under tmp_path instead of the real PROJECT_ROOT.
+    upload_dir = tmp_path / "data"
+    monkeypatch.setattr(discord_bot_module, "DATA_DIR", upload_dir)
+    monkeypatch.setattr(bot_module, "DATA_DIR", upload_dir)
     monkeypatch.setattr(safety_classifier_module, "ClaudeOneShotReasoner", _FakeFlaggingReasoner)
     monkeypatch.setattr(guardian_transcript_module, "ClaudeOneShotReasoner", _FakeSummaryReasoner)
 
@@ -319,7 +363,7 @@ async def _build_stack(tmp_path: Path, monkeypatch) -> _Stack:
     adapter = DiscordAdapter(config, core_services)
     await host.attach_adapter("discord", adapter)
 
-    return _Stack(host, adapter, config, users)
+    return _Stack(host, adapter, config, users, received_prompts)
 
 
 async def _wait_until(predicate, *, timeout: float = 8.0, interval: float = 0.05) -> bool:
@@ -441,5 +485,67 @@ async def test_plain_users_guardian_of_kid_has_no_effect_without_monitored_flag(
         await _handle_dm_text(stack.client_handle(), message)  # type: ignore[arg-type]
         await asyncio.sleep(0.3)
         assert stack.users[_GUARDIAN_ID].dm_channel.sent == [], "PlainUser is not monitored; no alert should fire"
+    finally:
+        await stack.stop()
+
+
+async def test_image_only_dm_reaches_claude_as_multimodal_content(tmp_path, monkeypatch) -> None:
+    """A caption-less image attachment must not be silently dropped (the
+    original bug: on_message bailed out on empty message.content, ignoring
+    attachments entirely) and must reach the backend as a real image content
+    block, not just acknowledged with a text-only reply."""
+    stack = await _build_stack(tmp_path, monkeypatch)
+    try:
+        image_bytes = b"\x89PNG\r\n\x1a\nfake-flight-screenshot-bytes"
+        attachment = _FakeAttachment(
+            attachment_id=555,
+            filename="flight.png",
+            content_type="image/png",
+            data=image_bytes,
+        )
+        message = _FakeInboundMessage(stack.users[_PLAIN_ID], "", msg_id=5, attachments=[attachment])
+
+        assert not message.content and message.attachments, "sanity: this is the caption-less image case"
+        await _handle_dm_text(stack.client_handle(), message)  # type: ignore[arg-type]
+
+        assert stack.users[_PLAIN_ID].dm_channel.sent, "image-only DM must not be silently dropped"
+        assert _FAKE_REPLY in stack.users[_PLAIN_ID].dm_channel.sent[-1]
+
+        assert len(stack.received_prompts) == 1
+        prompt = stack.received_prompts[0]
+        assert isinstance(prompt, list), "an image attachment must produce multi-modal content, not a plain string"
+        assert prompt[0] == {"type": "text", "text": "What's in this image?"}
+        # A "[File saved to: ...]" text block must accompany the inline
+        # image block, matching every Telegram upload path's convention
+        # (bot.py's handle_photo etc.) - omitting it is what made a second
+        # image in the same session unreliable (see _prompt()'s comment).
+        path_hint = prompt[1]
+        assert path_hint["type"] == "text"
+        assert path_hint["text"].startswith("[File saved to: ")
+        image_block = prompt[2]
+        assert image_block["type"] == "image"
+        assert image_block["source"]["media_type"] == "image/png"
+        assert base64.b64decode(image_block["source"]["data"]) == image_bytes
+    finally:
+        await stack.stop()
+
+
+async def test_image_attachment_with_caption_uses_caption_as_text(tmp_path, monkeypatch) -> None:
+    stack = await _build_stack(tmp_path, monkeypatch)
+    try:
+        attachment = _FakeAttachment(
+            attachment_id=556,
+            filename="flight.png",
+            content_type="image/png",
+            data=b"more-fake-bytes",
+        )
+        message = _FakeInboundMessage(
+            stack.users[_PLAIN_ID], "Is this the right flight?", msg_id=6, attachments=[attachment]
+        )
+        await _handle_dm_text(stack.client_handle(), message)  # type: ignore[arg-type]
+
+        assert len(stack.received_prompts) == 1
+        prompt = stack.received_prompts[0]
+        assert prompt[0] == {"type": "text", "text": "Is this the right flight?"}
     finally:
         await stack.stop()

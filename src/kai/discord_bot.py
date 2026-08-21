@@ -37,13 +37,15 @@ from discord.ext import commands
 
 from kai import sessions
 from kai.application_host import KaiCoreServices
-from kai.bot import _stream_publishable_prefix
-from kai.config import Config, UserConfig
+from kai.bot import _save_upload, _stream_publishable_prefix
+from kai.config import DATA_DIR, Config, UserConfig
+from kai.workshop.artifacts import InboundArtifact
 from kai.workshop.domain import MessageId, RunId
 from kai.workshop.execution_coordinator import CanonicalExecutionDisposition
 from kai.workshop.guardian_access import GuardianAccessError, resolve_guardian_target
 from kai.workshop.guardian_transcript import read_target_transcript, summarize_transcript
 from kai.workshop.inbound import InboundMessage
+from kai.workshop.runtime_profiles import WorkshopRuntimeProfileError
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ class KaiDiscordClient(commands.Bot):
         if message.guild is not None:
             # DM-only for Phase 1; ignore anything from a guild/server channel.
             return
-        if not message.content:
+        if not message.content and not message.attachments:
             return
         await _handle_dm_text(self, message)
 
@@ -104,6 +106,9 @@ def _authorized_user(config: Config, discord_user_id: int) -> UserConfig | None:
     return config.get_user_config_by_discord(discord_user_id)
 
 
+_IMAGE_CONTENT_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
 async def _handle_dm_text(client: KaiDiscordClient, message: discord.Message) -> None:
     config = client.kai_config
     user_config = _authorized_user(config, message.author.id)
@@ -111,9 +116,17 @@ async def _handle_dm_text(client: KaiDiscordClient, message: discord.Message) ->
         return
 
     chat_id = message.author.id
-    prompt = message.content
+    image_attachments = [
+        attachment
+        for attachment in message.attachments
+        if (attachment.content_type or "").split(";", 1)[0].strip().lower() in _IMAGE_CONTENT_TYPES
+    ]
+    # A bare image with no caption still needs prompt text - mirrors bot.py's
+    # handle_photo, which falls back to the same default for Telegram.
+    prompt = message.content or ("What's in this image?" if image_attachments else "")
 
     execution = client.kai_core_services.private_text_execution
+    accept_started_at = time.monotonic()
     try:
         acceptance = await execution.accept(
             InboundMessage(
@@ -131,11 +144,115 @@ async def _handle_dm_text(client: KaiDiscordClient, message: discord.Message) ->
             raise RuntimeError("Workshop command acceptance returned a non-message aggregate")
         run_id = acceptance.run.run_id
     except Exception:
-        log.exception("Workshop private-text acceptance failed (discord message_id=%s)", message.id)
+        log.exception(
+            "Workshop private-text acceptance failed (discord message_id=%s, after %.2fs)",
+            message.id,
+            time.monotonic() - accept_started_at,
+        )
         await message.channel.send("Bjornheim AI could not safely accept this request. Please try again.")
         return
+    # Diagnostic instrumentation added 2026-08-20 while investigating a bug
+    # where Discord messages reached the persistent Claude subprocess (per
+    # kai.claude's "Wrote prompt to Claude subprocess" log line) but left no
+    # trace at all in event_log/runs - not even this accept() step's own
+    # message.created/run.accepted events, despite accept() apparently
+    # returning normally (no exception, no log line) to get this far. If
+    # this log line is ever missing for a message that nonetheless reached
+    # the Claude subprocess, accept() did not actually return control here -
+    # look at asyncio task/generator lifecycle around the call above instead
+    # of the database layer. Safe to remove once the root cause is found.
+    log.info(
+        "Discord message accepted as run %s (message_id=%s, disposition=%s, took %.2fs)",
+        run_id,
+        message.id,
+        acceptance.disposition,
+        time.monotonic() - accept_started_at,
+    )
 
-    await _stream_and_deliver(client, message, run_id=run_id)
+    if image_attachments:
+        try:
+            # Not principal_storage.for_runtime_config_id(chat_id): that
+            # registry's _by_config_id is keyed by the "prefer Telegram"
+            # canonical config id for hybrid Telegram+Discord users (see
+            # bjornheim_discord_family_adapter memory), so a raw Discord
+            # snowflake id raises WorkshopStorageNamespaceError even for an
+            # already-authorized user (hit in production 2026-08-20).
+            # acceptance.run.requested_by_principal_id is the same identity
+            # this exact message's accept() already resolved correctly.
+            principal_id = acceptance.run.requested_by_principal_id
+            # get_os_user() is only meaningful for a protected multi-OS-user
+            # install (grants a read ACL when the agent runs as a different
+            # OS user than this one); it raises WorkshopRuntimeProfileError
+            # for any runtime_config_id with no registered protected profile
+            # rather than returning None (unlike get_user_config(), which is
+            # a plain dict lookup) - and Discord's raw snowflake id is never
+            # one, in this single_user deployment (hit in production
+            # 2026-08-20, same day as the principal_storage bug above: both
+            # are the module docstring's warning about reusing Telegram-
+            # shaped identity lookups for Discord actually landing). No ACL
+            # grant is needed here, so treat "not a protected profile" as
+            # "no reader user", not a reason to fail the whole upload.
+            try:
+                reader_user = client.kai_core_services.subprocess_pool.get_os_user(chat_id)
+            except WorkshopRuntimeProfileError:
+                reader_user = None
+            for attachment in image_attachments:
+                raw = await attachment.read()
+                media_type = (attachment.content_type or "image/png").split(";", 1)[0].strip().lower()
+                saved_path = _save_upload(
+                    raw,
+                    attachment.filename or f"discord_image_{attachment.id}",
+                    principal_id=principal_id,
+                    reader_user=reader_user,
+                )
+                await execution.record_inbound_artifact(
+                    InboundArtifact(
+                        message_id=aggregate_id,
+                        kind="photo",
+                        media_type=media_type,
+                        storage_path=saved_path,
+                        source_transport="discord",
+                        source_unique_id=str(attachment.id),
+                        occurred_at=message.created_at,
+                        original_filename=attachment.filename,
+                    ),
+                    storage_root=DATA_DIR / "files",
+                )
+        except Exception:
+            # Gate execute() on this succeeding rather than falling back to a
+            # text-only reply: silently answering about an image nobody
+            # actually attached would be worse than a clear error asking for
+            # a resend (see bug investigation 2026-08-20 - the whole reason
+            # this path exists is that image messages used to vanish with no
+            # error at all).
+            log.exception(
+                "Failed to save/record Discord image attachment(s) (run %s, message_id=%s)",
+                run_id,
+                message.id,
+            )
+            await message.channel.send(
+                "I accepted your message but couldn't save the attached image. Please try resending it."
+            )
+            return
+
+    execute_started_at = time.monotonic()
+    try:
+        await _stream_and_deliver(client, message, run_id=run_id)
+    except Exception:
+        log.exception(
+            "Discord run %s failed during execute/deliver (message_id=%s, after %.2fs)",
+            run_id,
+            message.id,
+            time.monotonic() - execute_started_at,
+        )
+        raise
+    else:
+        log.info(
+            "Discord run %s finished execute/deliver (message_id=%s, took %.2fs)",
+            run_id,
+            message.id,
+            time.monotonic() - execute_started_at,
+        )
 
 
 async def _stream_and_deliver(client: KaiDiscordClient, source_message: discord.Message, *, run_id: RunId) -> None:

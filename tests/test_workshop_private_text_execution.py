@@ -205,3 +205,30 @@ async def test_owner_discovers_only_durably_accepted_workshop_client_runs(tmp_pa
         )
     finally:
         await service.stop()
+
+
+async def test_owner_also_recovers_bot_transport_runs_stranded_before_execute(tmp_path: Path):
+    """A run whose accept() committed but whose execute() was never called
+    (e.g. the process died in between) must not be stuck forever just
+    because it came from a bot transport instead of the browser client -
+    see private_text_execution.py's recoverable_client_runs() docstring."""
+    database = tmp_path / "kai.db"
+    await _foundation(database)
+    pool = SimpleNamespace(prepare_execution=AsyncMock())
+    service = await WorkshopPrivateTextExecutionService.open_and_start(
+        database,
+        WorkshopRuntimePool(pool, profile_registry(101)),  # type: ignore[arg-type]
+        registered_backend_ids=frozenset({"codex"}),
+    )
+    try:
+        accepted = await service.accept(_message(suffix="stranded-telegram"))
+
+        assert await service.recoverable_client_runs() == (
+            RecoverableClientRun(
+                accepted.run.run_id,
+                profile_id(101),
+                "Canonical prompt stranded-telegram",
+            ),
+        )
+    finally:
+        await service.stop()

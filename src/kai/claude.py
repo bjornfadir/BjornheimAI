@@ -711,9 +711,35 @@ class ClaudeCodeBackend(AgentBackend):
             StreamEvent objects with accumulated text. The final event has
             done=True and includes the complete AgentResponse.
         """
+        # Diagnostic instrumentation added 2026-08-20 while investigating a
+        # bug where multiple Discord messages each reached "Wrote prompt to
+        # Claude subprocess" on the same persistent subprocess within
+        # minutes of each other - which should be impossible if self._lock
+        # is serializing correctly, since it's only released once this
+        # generator is exhausted or explicitly closed. If a turn's log ever
+        # shows "did not complete normally" (or is missing "completed
+        # normally" entirely), the caller abandoned/cancelled iteration
+        # (e.g. via asyncio.wait_for or task cancellation) before this
+        # generator reached done=True, which frees the lock for the next
+        # send() while this turn's stdout may still be unread - the next
+        # turn's caller then reads stale bytes belonging to this one. Safe
+        # to remove once the root cause is found.
+        reached_done = False
         async with self._lock:
-            async for event in self._send_locked(prompt, chat_id=chat_id):
-                yield event
+            try:
+                async for event in self._send_locked(prompt, chat_id=chat_id):
+                    if event.done:
+                        reached_done = True
+                    yield event
+            finally:
+                if reached_done:
+                    log.info("Claude turn completed normally, lock released")
+                else:
+                    log.warning(
+                        "Claude turn did NOT complete normally (caller likely abandoned "
+                        "iteration before done=True); lock released anyway, subprocess "
+                        "stdout may have unread bytes from this turn"
+                    )
 
     async def _send_locked(self, prompt: str | list, chat_id: int | None = None) -> AsyncIterator[StreamEvent]:
         """
